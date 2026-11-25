@@ -65,26 +65,30 @@ VSVersionInfo(
 [IO.File]::WriteAllText($vtxt, $info, (New-Object System.Text.UTF8Encoding($false)))
 
 # ---------- 3. 构建前端 + PyInstaller 打包 ----------
-if (-not $SkipBuild) {
-    Step "[3/5] 构建前端 npm ci && npm run build"
-    Push-Location (Join-Path $root "frontend")
-    try {
-        & npm ci
-        if ($LASTEXITCODE -ne 0) { throw "npm ci 失败" }
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
-    } finally { Pop-Location }
+if ($SkipPackage) {
+    Step "[3/5] 跳过构建与打包，复用现有 dist\DocFlow"
 } else {
-    Step "[3/5] 跳过前端构建，复用现有 frontend/dist"
-}
-if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) { throw "frontend\dist\index.html 不存在，先构建前端" }
+    if (-not $SkipBuild) {
+        Step "[3/5] 构建前端 npm ci && npm run build"
+        Push-Location (Join-Path $root "frontend")
+        try {
+            & npm ci
+            if ($LASTEXITCODE -ne 0) { throw "npm ci 失败" }
+            & npm run build
+            if ($LASTEXITCODE -ne 0) { throw "前端构建失败" }
+        } finally { Pop-Location }
+    } else {
+        Step "[3/5] 跳过前端构建，复用现有 frontend/dist"
+    }
+    if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) { throw "frontend\dist\index.html 不存在，先构建前端" }
 
-Step "       PyInstaller 打包 docflow.spec"
-Push-Location $root
-try {
-    & python -m PyInstaller (Join-Path $PSScriptRoot "docflow.spec") --noconfirm
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller 打包失败" }
-} finally { Pop-Location }
+    Step "       PyInstaller 打包 docflow.spec"
+    Push-Location $root
+    try {
+        & python -m PyInstaller (Join-Path $PSScriptRoot "docflow.spec") --noconfirm
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller 打包失败" }
+    } finally { Pop-Location }
+}
 
 $dist = Join-Path $root "dist\DocFlow"
 if (-not (Test-Path (Join-Path $dist "DocFlow.exe"))) { throw "产物缺失：$dist\DocFlow.exe" }
