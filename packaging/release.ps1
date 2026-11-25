@@ -1,4 +1,4 @@
-# DocFlow GitHub Releases 一键发布
+﻿# DocFlow GitHub Releases 一键发布
 # 用法（在 docflow 目录）:
 #   .\packaging\release.ps1                 # 构建 + 打包 + 发 Release
 #   .\packaging\release.ps1 -SkipBuild      # 复用已构建的 frontend/dist
@@ -7,6 +7,7 @@
 param(
     [string]$Notes = "",
     [switch]$SkipBuild,
+    [switch]$SkipPackage,
     [switch]$Prerelease,
     [switch]$DryRun,
     [string]$Repo = ""      # owner/name，留空则从 git remote 解析
@@ -101,7 +102,8 @@ $zip = Join-Path $relDir $zipName
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::CreateFromDirectory($dist, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
-$sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+$shaBytes = [Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($zip))
+        $sha = ([BitConverter]::ToString($shaBytes)).Replace("-", "").ToLower()
 $size = (Get-Item $zip).Length
 $builtAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 if ($Notes -eq "") { $Notes = "DocFlow 桌面版 $tag" }
@@ -169,7 +171,8 @@ if ($gh) {
         return
     }
     $hdr = @{ Authorization = "Bearer $tok"; Accept = "application/vnd.github+json"; "User-Agent" = "docflow-release" }
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$tag" -Headers $hdr -ErrorAction SilentlyContinue
+    $rel = $null
+    try { $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$tag" -Headers $hdr -TimeoutSec 30 } catch { $rel = $null }
     if (-not $rel) {
         $body = @{ tag_name = $tag; name = "DocFlow $tag"; body = $Notes; prerelease = [bool]$Prerelease } | ConvertTo-Json
         $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -Body $body -ContentType "application/json"
@@ -179,7 +182,24 @@ if ($gh) {
         if ($a.name -eq $zipName) { Invoke-RestMethod -Method Delete -Uri $a.upload_url -Headers $hdr | Out-Null }
     }
     $upUrl = "https://uploads.github.com/repos/$Repo/releases/$($rel.id)/assets?name=$zipName"
-    Invoke-RestMethod -Method Post -Uri $upUrl -Headers $hdr -InFile $zip -ContentType "application/zip" | Out-Null
+    # 大文件用 .NET HttpClient 流式上传（长超时、分块读取），避免 Invoke-RestMethod -InFile 卡死
+    [Net.ServicePointManager]::Expect100Continue = $false
+    [Net.ServicePointManager]::DefaultConnectionLimit = 4
+    Add-Type -AssemblyName System.Net.Http
+    $client = New-Object System.Net.Http.HttpClient
+    $client.Timeout = [TimeSpan]::FromMinutes(30)
+    $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $tok)
+    $client.DefaultRequestHeaders.Add("User-Agent", "docflow-release")
+    $fs = [IO.File]::Open($zip, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sc = New-Object System.Net.Http.StreamContent($fs)
+        $sc.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/zip")
+        $resp = $client.PostAsync($upUrl, $sc).GetAwaiter().GetResult()
+        $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $resp.IsSuccessStatusCode) { throw ("资产上传失败: {0} {1}" -f [int]$resp.StatusCode, $text) }
+        $asset = $text | ConvertFrom-Json
+        Write-Host ("    资产已上传: {0} ({1:N1} MB)" -f $asset.name, ($asset.size/1MB)) -ForegroundColor Green
+    } finally { $fs.Dispose(); $client.Dispose() }
     Write-Host ("    OK -> {0}" -f $rel.html_url) -ForegroundColor Green
 }
 
