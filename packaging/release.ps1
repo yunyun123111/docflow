@@ -152,12 +152,16 @@ if ($gh) {
     if ($LASTEXITCODE -ne 0) { throw "gh release 失败" }
     Write-Host ("    OK -> https://github.com/{0}/releases/tag/{1}" -f $Repo, $tag) -ForegroundColor Green
 } else {
-    # 兜底：用 GitHub API（需环境变量 GITHUB_TOKEN）
+    # 兜底：用 GitHub API。令牌来源优先 GITHUB_TOKEN，其次复用本机 git 已缓存凭据（免装 gh）
     $tok = $env:GITHUB_TOKEN
     if (-not $tok) {
-        Write-Host "    未找到 gh，且未设置 GITHUB_TOKEN。" -ForegroundColor Yellow
-        Write-Host "    推荐安装 GitHub CLI：winget install GitHub.cli  然后 gh auth login" -ForegroundColor Yellow
-        Write-Host "    或设 GITHUB_TOKEN（scopes: repo）后重跑。zip 已就绪：$zip" -ForegroundColor Yellow
+        $tok = ("protocol=https`nhost=github.com`n`n" | git credential fill 2>$null |
+                Where-Object { $_ -like 'password=*' }) -replace '^password=', ''
+    }
+    if (-not $tok) {
+        Write-Host "    未找到 gh，也没有可用 GitHub 凭据。" -ForegroundColor Yellow
+        Write-Host "    任选其一：winget install GitHub.cli 后 gh auth login；或设 GITHUB_TOKEN(scope: repo)；" -ForegroundColor Yellow
+        Write-Host "    或在终端先 git push 一次让凭据管理器缓存令牌，再重跑本脚本。zip 已就绪：$zip" -ForegroundColor Yellow
         return
     }
     $hdr = @{ Authorization = "Bearer $tok"; Accept = "application/vnd.github+json"; "User-Agent" = "docflow-release" }
