@@ -55,6 +55,7 @@ END;
 # 只加不删，逐列 try/except，失败也只记日志——绝不因为一次补列失败而让程序起不来。
 ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("recon_runs", "source", "VARCHAR(12) NOT NULL DEFAULT 'ledger'"),
+    ("recycle_items", "prev_status", "VARCHAR(20) NOT NULL DEFAULT ''"),
 ]
 
 

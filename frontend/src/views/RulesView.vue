@@ -268,8 +268,19 @@ onActivated(refreshAll)
             <el-descriptions-item v-for="(v, k) in sim.result.result.detail" :key="k" :label="String(k)">{{ v }}</el-descriptions-item>
           </el-descriptions>
           <el-table :data="sim.result.rule_hits" size="small" style="margin-top: 8px">
-            <el-table-column prop="name" label="命中规则" /><el-table-column prop="score" label="分" width="80" />
+            <el-table-column prop="name" label="命中规则" />
+            <el-table-column prop="document_type" label="判为" width="100" />
+            <el-table-column label="依据" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.where === 'title' ? 'success' : 'info'">
+                  {{ row.where === 'title' ? '标题命中' : '正文提及' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="confidence" label="基准" width="80" />
+            <el-table-column prop="score" label="计分" width="80" />
           </el-table>
+          <div class="sim-note">正文深处提到「发票/提货」只按 0.55 折算，压不过标题里的类型词。</div>
         </template>
       </el-tab-pane>
     </el-tabs>
@@ -303,4 +314,5 @@ onActivated(refreshAll)
 
 <style scoped>
 .cat-row { display: flex; justify-content: space-between; align-items: center; width: 100%; padding-right: 8px; }
+.sim-note { margin-top: 6px; font-size: 12px; color: var(--df-muted); }
 </style>

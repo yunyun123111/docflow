@@ -54,6 +54,7 @@ async function save() {
       email_subject_prefix: s.value.email.subject_prefix,
       recon_enabled: s.value.recon.enabled, recon_interval_minutes: s.value.recon.interval_minutes,
       auto_backup_enabled: s.value.auto_backup.enabled, auto_backup_keep: s.value.auto_backup.keep,
+      our_company: (s.value.our_company || '').trim(),
       bundle_merge_suggest_enabled: s.value.bundle.merge_suggest_enabled,
       bundle_merge_amount_tolerance: s.value.bundle.amount_tolerance_pct / 100,
       bundle_merge_date_window_days: s.value.bundle.date_window_days,
@@ -265,6 +266,15 @@ onActivated(load)
             </template>
             <div class="hint" style="margin-bottom: 8px">
               同一合同号的销售合同、发票、结算单、提货单会自动归进一个业务包；这里控制「销售⇄采购」成对的合并建议。
+            </div>
+            <div class="row">
+              <span class="muted">本公司名称</span>
+              <el-input v-model="s.our_company" size="small" style="max-width: 320px"
+                        placeholder="例：华山云创供应链科技（山西）有限公司" />
+            </div>
+            <div class="hint" style="margin: 6px 0 8px">
+              填了才分得清「我方 / 对方」：业务包的客户取文中不是本公司的另一方，合并建议也按它判断是不是同一家公司。
+              留空时按文中出现顺序猜，历史包可在<el-button link type="primary" size="small" @click="router.push('/bundles')">文档归集</el-button>点「重建归集」重算。
             </div>
             <div class="row">
               <span class="muted">金额相对差 ≤</span>

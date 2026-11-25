@@ -140,7 +140,7 @@ def test_purging_document_cascades_item(db):
 
 
 def test_recycled_doc_excluded_from_completeness(db):
-    """进了回收站的发票不该继续算作包内证据。"""
+    """进了回收站的发票不该继续算作包内证据，恢复后又算回来。"""
     from backend.services.recycle import to_recycle
 
     cno = "XS-2026-2004"
@@ -156,6 +156,18 @@ def test_recycled_doc_excluded_from_completeness(db):
     rep = svc.get_bundle_detail(db, bid)
     assert rep["complete"] is False
     assert rep["completeness"]["missing"] == ["发票"]
+
+    # 从回收站恢复：状态回归档，齐备度也随之回来
+    from backend.models import RecycleItem
+    from backend.services.recycle import restore
+
+    item = db.query(RecycleItem).filter(RecycleItem.document_id == inv.id).first()
+    assert item.prev_status == STATUS_ARCHIVED
+    restore(db, item)
+    db.expire_all()
+    assert db.get(Document, inv.id).status == STATUS_ARCHIVED
+    rep = svc.get_bundle_detail(db, bid)
+    assert rep["complete"] is True and rep["completeness"]["missing"] == [], rep["completeness"]
 
 
 def test_manual_add_remove_and_role_override(db):
@@ -239,6 +251,38 @@ def test_suggestions_hit_and_miss(db):
     assert hit["our_entity"] == "华东供应链3001"
     assert hit["sale_bundle_id"] != hit["purchase_bundle_id"]
 
+
+def test_our_company_setting_splits_bundle_parties(db, monkeypatch):
+    """本公司名称决定谁是「我方」：没填宁可留空，填了重建归集就分开。
+
+    从前 fields 把第一个公司名同时写进两个字段，包上的客户和我方主体都是对方，
+    合并建议拿我方主体比对永远相等，配对全错。
+    """
+    cno = "XS-2026-6301"
+    _doc(db, "销售合同6301.txt", "合同", "销售合同", cno=cno,
+         party="山西宏达钢铁有限公司", company="山西宏达钢铁有限公司")
+    b = db.query(Bundle).filter(Bundle.contract_key == "XS20266301").first()
+    assert b.customer == "山西宏达钢铁有限公司"
+    assert b.our_entity == "", "分不清我方时不该把对方抄成我方主体"
+
+    monkeypatch.setattr(settings, "OUR_COMPANY", "华山云创供应链科技有限公司")
+    svc.rebuild_all(db)
+    db.expire_all()
+    b = db.get(Bundle, b.id)
+    assert b.our_entity == "华山云创供应链科技有限公司"
+    assert b.customer == "山西宏达钢铁有限公司"
+
+
+def test_our_company_setting_survives_new_documents(db, monkeypatch):
+    """填了本公司名称后新建的包直接带上正确的我方主体，不必再重建一次。"""
+    monkeypatch.setattr(settings, "OUR_COMPANY", "华山云创供应链科技有限公司")
+    cno = "XS-2026-6302"
+    _doc(db, "销售合同6302.txt", "合同", "销售合同", cno=cno,
+         party="山西宏达钢铁有限公司", company="山西宏达钢铁有限公司")
+    b = db.query(Bundle).filter(Bundle.contract_key == "XS20266302").first()
+    assert b.our_entity == "华山云创供应链科技有限公司"
+    assert b.customer == "山西宏达钢铁有限公司"
+    assert b.name == f"{cno} · 山西宏达钢铁有限公司"
 
 def test_rebuild_backfills_history(db):
     """历史数据：删掉包后 rebuild_all 依据归档文档重新长出来，手工包不被抢。"""
@@ -441,3 +485,24 @@ def test_settled_amount_is_bucketed_not_summed(db):
     bad = group(bad_cno)
     assert bad["settlement_role"] == "发票", bad
     assert bad["settlement_sum"] == 300000.0 and bad["amount_gap"] == -152000.0, bad
+
+
+def test_company_selfcheck_points_at_the_fix(db, monkeypatch):
+    """没填本公司名称只提示；真的出现「客户==我方」脏包时才给一键修复。"""
+    from backend.services.selfcheck import _check_company
+
+    monkeypatch.setattr(settings, "OUR_COMPANY", "")
+    cno = "XS-2026-6303"
+    _doc(db, "销售合同6303.txt", "合同", "销售合同", cno=cno, party="山西宏达钢铁有限公司")
+    info = _check_company()
+    assert info["level"] == "info" and info["fix"] is None, info
+
+    b = db.query(Bundle).filter(Bundle.contract_key == "XS20266303").first()
+    b.our_entity = b.customer
+    db.commit()
+    warn = _check_company()
+    assert warn["level"] == "warn" and warn["fix"] == "rebuild_bundles", warn
+
+    monkeypatch.setattr(settings, "OUR_COMPANY", "华山云创供应链科技有限公司")
+    ok = _check_company()
+    assert ok["level"] == "ok" and ok["message"] == "华山云创供应链科技有限公司", ok

@@ -7,14 +7,19 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from backend.config import settings
-from backend.models import Document, OperationLog, ProcessingJob, STATUS_ARCHIVED, STATUS_FAILED, STATUS_NEED_REVIEW, STATUS_PENDING
+from backend.models import (
+    Document, OperationLog, ProcessingJob, STATUS_ARCHIVED, STATUS_FAILED, STATUS_NEED_REVIEW,
+    STATUS_PENDING, STATUS_RECYCLED,
+)
 
 
 def overview(db: Session) -> dict:
-    total = db.query(func.count(Document.id)).scalar() or 0
+    # 文档库口径：回收站里的记录不算「库里有这份文档」，恢复后才回来
+    total = db.query(func.count(Document.id)).filter(Document.status != STATUS_RECYCLED).scalar() or 0
     status_counts = dict(db.query(Document.status, func.count(Document.id)).group_by(Document.status).all())
     today = datetime.now().strftime("%Y-%m-%d")
-    today_new = db.query(func.count(Document.id)).filter(func.date(Document.created_at) == today).scalar() or 0
+    today_new = db.query(func.count(Document.id)).filter(func.date(Document.created_at) == today,
+                                                        Document.status != STATUS_RECYCLED).scalar() or 0
     today_arch = db.query(func.count(Document.id)).filter(func.date(Document.archived_at) == today).scalar() or 0
     running = db.query(ProcessingJob).filter(ProcessingJob.status == "running").order_by(ProcessingJob.id.desc()).first()
     return {
@@ -24,6 +29,7 @@ def overview(db: Session) -> dict:
         "need_review": status_counts.get(STATUS_NEED_REVIEW, 0),
         "archived": status_counts.get(STATUS_ARCHIVED, 0),
         "failed": status_counts.get(STATUS_FAILED, 0),
+        "recycled": status_counts.get(STATUS_RECYCLED, 0),
         "today_new": today_new,
         "today_archived": today_arch,
         "running_job": None if not running else {

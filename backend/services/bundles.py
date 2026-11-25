@@ -100,14 +100,14 @@ def category_leaf(db: Session, doc: Document) -> str:
 
 
 def header_text(db: Session, doc: Document) -> str:
-    """正文抬头（前几行）：合同标题通常就在这里。"""
+    """正文抬头（前几行）：合同标题通常就在这里。与规则引擎同一口径。"""
     from backend.models import DocumentText
+    from backend.services.rules import header_span
 
     row = db.get(DocumentText, doc.id)
     if not row:
         return ""
-    lines = [ln.strip() for ln in (row.text or "").splitlines() if ln.strip()]
-    return "\n".join(lines[:4])[:200]
+    return header_span(row.text)[0]
 
 
 def infer_contract_role(db: Session, doc: Document) -> str:
@@ -144,6 +144,27 @@ def is_contract_role(role: str) -> bool:
     return role in CONTRACT_ROLES or role == "合同"
 
 
+def _parties_of(fields: dict[str, str]) -> tuple[str, str]:
+    """(我方主体, 对方客户)：本公司名称设置优先，且两者绝不返回同一个值。
+
+    从前 fields 把文中第一个公司名同时写进「公司名称」和「对方单位」，于是包上的客户
+    和我方主体都是对方，合并建议拿我方主体比对永远相等，配对全错。
+    """
+    from backend.config import settings
+    from backend.services.fields import FIELD_COMPANY, FIELD_COUNTERPARTY
+
+    _, _, _, norm_text, _, _ = _helpers()
+    party = (fields.get(FIELD_COUNTERPARTY, "") or "").strip()
+    company = (fields.get(FIELD_COMPANY, "") or "").strip()
+    ours = (settings.OUR_COMPANY or "").strip()
+    if not ours:
+        # 没填本公司：只有两个名字确实不同才敢说第二个是我方，否则宁可留空
+        ours = company if company and norm_text(company) != norm_text(party) else ""
+    other = party if party and norm_text(party) != norm_text(ours) else (
+        company if company and norm_text(company) != norm_text(ours) else "")
+    return ours, other
+
+
 def auto_name(cno: str, customer: str) -> str:
     """自动包名的唯一口径：合同号 · 客户。刷新时按同一口径重算，别留着建档时的旧客户。"""
     return " · ".join(x for x in (cno, customer) if x)
@@ -156,13 +177,13 @@ def get_or_create_bundle(db: Session, key: str, doc: Document, fields: dict[str,
               .order_by(Bundle.source.desc(), Bundle.id.asc()).first())
     if bundle:
         return bundle
-    from backend.services.fields import FIELD_CONTRACT_NO, FIELD_COUNTERPARTY
+    from backend.services.fields import FIELD_CONTRACT_NO
 
     cno = fields.get(FIELD_CONTRACT_NO, "")
-    customer = fields.get(FIELD_COUNTERPARTY, "")
+    ours, customer = _parties_of(fields)
     name = auto_name(cno or key, customer) or (doc.current_filename or doc.original_filename)
     bundle = Bundle(name=name[:200], contract_key=norm_no(cno) or key, customer=customer[:200],
-                    source="auto")
+                    our_entity=ours[:200], source="auto")
     try:
         with db.begin_nested():      # 保存点：撞了唯一索引也不牵连本线程其它改动
             db.add(bundle)
@@ -334,8 +355,12 @@ def refresh_bundle(db: Session, bundle: Bundle) -> Bundle:
         if new_key and new_key != bundle.contract_key and _take_key(db, bundle, new_key):
             return refresh_bundle(db, bundle)   # 条目变了，整套派生值重算一遍
         bundle.contract_key = new_key
-        bundle.customer = (pf.get(FIELD_COUNTERPARTY, "") or bundle.customer)[:200]
-        bundle.our_entity = (pf.get(FIELD_COMPANY, "") or bundle.our_entity)[:200]
+        ours, other = _parties_of(pf)
+        # 设置里的本公司名称直接生效，不必等用户重新识别一遍历史文档
+        if ours:
+            bundle.our_entity = ours[:200]
+        if other:
+            bundle.customer = other[:200]
         bundle.amount = to_decimal(pf.get(FIELD_AMOUNT, ""))
         bundle.sign_date = to_date(pf.get(FIELD_DATE, ""))
         if bundle.source == "auto":

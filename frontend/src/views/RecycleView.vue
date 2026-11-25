@@ -24,13 +24,22 @@ function remain(it: any): string {
   return `${Math.round(hours / 24)} 天后清理`
 }
 
+const BACK_LABEL: Record<string, string> = {
+  archived: '已归档', pending: '待整理', need_review: '待审核',
+  failed: '失败', duplicate: '重复', processing: '识别中',
+}
+
+function backTo(it: any) {
+  return BACK_LABEL[it.prev_status] || '待整理'
+}
+
 async function restore(it: any) {
   if (it.file_missing) {
     ElMessage.warning('该记录的文件已被删除，没有可恢复的文件；如需清掉记录请用「彻底删除」')
     return
   }
-  await http.post(`/recycle/${it.id}/restore`)
-  ElMessage.success('已恢复到原位置')
+  const r: any = await http.post(`/recycle/${it.id}/restore`)
+  ElMessage.success(`已恢复到原位置，状态回到「${backTo(it)}」${r?.document_id ? '，文档库重新可见' : ''}`)
   load()
 }
 
@@ -62,7 +71,7 @@ onActivated(load)
   <el-card v-loading="loading">
     <div class="toolbar" style="margin-bottom: 10px">
       <el-button type="danger" :disabled="!items.length" @click="empty">清空回收站</el-button>
-      <span class="muted hint">到期项由后台自动清理（保留期在「设置 → 目录与归档」调整，0 = 永不自动删）</span>
+      <span class="muted hint">已移入回收站的文档不在文档库显示；恢复后回到原位置与原状态，到期由后台自动清理（保留期在「设置 → 目录与归档」调整，0 = 永不自动删）</span>
       <div class="grow" />
       <el-button size="small" @click="load">刷新</el-button>
     </div>
@@ -80,6 +89,9 @@ onActivated(load)
         </template>
       </el-table-column>
       <el-table-column prop="reason" label="原因" width="130" class-name="col-lg" label-class-name="col-lg" />
+      <el-table-column label="恢复后" width="96" class-name="col-lg" label-class-name="col-lg">
+        <template #default="{ row }"><el-tag size="small" :type="row.prev_status === 'archived' ? 'success' : 'info'">{{ backTo(row) }}</el-tag></template>
+      </el-table-column>
       <el-table-column prop="original_path" label="原位置" min-width="220" show-overflow-tooltip
                        class-name="col-xl" label-class-name="col-xl" />
       <el-table-column label="到期" width="150">

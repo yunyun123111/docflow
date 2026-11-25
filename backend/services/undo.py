@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from backend.models import Document, OperationLog, STATUS_NEED_REVIEW
+from backend.models import Document, OperationLog, STATUS_NEED_REVIEW, STATUS_RECYCLED
 from backend.services.archive import move_file, log_operation
 from backend.utils.fs import unique_filename
 from backend.utils.logger import get_logger
@@ -25,6 +25,9 @@ class UndoError(Exception):
 
 def undo_document(db: Session, doc: Document) -> int:
     """撤销该文档的全部可逆操作（由新到旧）。返回撤销条数。"""
+    if doc.status == STATUS_RECYCLED:
+        # 文件此刻在回收站里，动它会让回收记录指向空路径，恢复必然失败
+        raise UndoError("文档在回收站中，请先在回收站恢复，再撤销整理")
     logs = (db.query(OperationLog)
             .filter(OperationLog.document_id == doc.id,
                     OperationLog.op.in_(REVERSIBLE_OPS),

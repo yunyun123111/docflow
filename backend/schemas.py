@@ -129,6 +129,7 @@ class SettingsIn(BaseModel):
     watch_dirs: list[str] | None = None
     watch_interval: int | None = None
     seal_detect_enabled: bool | None = None
+    our_company: str | None = None
     email_enabled: bool | None = None
     email_imap_host: str | None = None
     email_imap_port: int | None = None

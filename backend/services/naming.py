@@ -27,6 +27,21 @@ def _field_str(fields: dict[str, tuple[Any, float]], name: str) -> str:
     return str(v[0]) if v else ""
 
 
+def _title_value(original: str, contract_no: str) -> str:
+    """{title} 去掉已经单独成段的合同号，也丢掉 .pdf-1 这类上传残留。
+
+    扫描件的文件名往往就是合同号，原样拼进模板会得到
+    20260512_HSYCXS（DD）-2026-0236_HSYCXS（DD）-2026-0236.pdf-1.pdf 这种名字。
+    """
+    t = original or ""
+    if contract_no and contract_no in t:
+        t = t.replace(contract_no, "")
+    t = t.strip(" _.-（）()【】")
+    if not t or re.fullmatch(r"(?:pdf|jpg|jpeg|png|gif|bmp|webp|tiff|docx?|xlsx?|pptx?|txt|csv|pdf-\d+|\d+)[- _]?\d*", t, re.I):
+        return ""
+    return t
+
+
 def _segment_value(key: str, fields: dict, doc_type: str, category_path: str, now: datetime, original: str) -> str:
     if key in _FIELD_KEYS:
         return _field_str(fields, _FIELD_KEYS[key])
@@ -43,7 +58,9 @@ def _segment_value(key: str, fields: dict, doc_type: str, category_path: str, no
         return doc_type or ""
     if key == "category":
         return (category_path or "").split("/")[-1] if category_path else ""
-    if key in ("title", "orig"):
+    if key == "title":
+        return _title_value(original, _field_str(fields, FIELD_CONTRACT_NO))
+    if key == "orig":
         return original or ""
     if key == "underscore":
         return "_"

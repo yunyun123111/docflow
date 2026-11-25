@@ -347,6 +347,32 @@ def _check_bundles() -> dict:
             "message": f"{total} 个业务包，同合同号无重复", "detail": "", "fix": "rebuild_bundles"}
 
 
+def _check_company() -> dict:
+    """本公司名称：不填就分不清我方与对方，业务包与合并建议的口径都是虚的。"""
+    from backend.config import settings
+    from backend.database import SessionLocal
+    from backend.models import Bundle
+
+    ours = (settings.OUR_COMPANY or "").strip()
+    if ours:
+        return {"key": "company", "label": "本公司名称", "level": OK, "message": ours, "detail": "", "fix": None}
+    try:
+        with SessionLocal() as db:
+            same = db.query(Bundle).filter(Bundle.customer != "", Bundle.our_entity != "",
+                                            Bundle.customer == Bundle.our_entity).count()
+    except Exception as exc:  # noqa: BLE001
+        return {"key": "company", "label": "本公司名称", "level": INFO,
+                "message": str(exc)[:100], "detail": "", "fix": None}
+    if same:
+        return {"key": "company", "label": "本公司名称", "level": WARN,
+                "message": f"未设置，{same} 个业务包的客户与我方主体同值",
+                "detail": "设置 → 无人值守 → 本公司名称 填上，再点「重建归集」即可分开；"
+                        "合并建议也靠它判断是不是同一家公司",
+                "fix": "rebuild_bundles"}
+    return {"key": "company", "label": "本公司名称", "level": INFO, "message": "未设置：分不清我方与对方",
+            "detail": "设置 → 无人值守 → 文档归集卡片", "fix": None}
+
+
 def run_checks(quick: bool = False) -> dict:
     """quick=True 只跑本地文件/数据库类检查（不碰网络、不加载 OCR 模型），供顶栏徽标使用。"""
     slow = ("_check_ocr", "_check_seal", "_check_ai", "_check_email", "_check_ocr_models",
@@ -354,7 +380,8 @@ def run_checks(quick: bool = False) -> dict:
     items: list[dict] = []
     all_fns = (_check_runtime, _check_dirs, _check_disk, _check_database, _check_fts, _check_cache,
                _check_interrupted, _check_missing_files, _check_bundles, _check_ocr, _check_ocr_models,
-               _check_seal, _check_ai, _check_watch, _check_email, _check_security, _check_backup)
+               _check_seal, _check_ai, _check_watch, _check_email, _check_security, _check_backup,
+               _check_company)
     for fn in [f for f in all_fns if not (quick and f.__name__ in slow)]:
         try:
             r = fn()

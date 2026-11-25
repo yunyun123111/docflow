@@ -12,6 +12,7 @@ import { useResponsive } from '../composables/useResponsive'
 const { isCompact } = useResponsive()
 const rows = ref<any[]>([])
 const total = ref(0)
+const recycledHidden = ref(0)
 const snippets = ref<Record<string, string>>({})
 const q = ref('')
 const filters = ref<any>({ status: [], document_type: '', file_type: '', dateRange: null })
@@ -61,6 +62,7 @@ async function load() {
     rows.value = r.items
     total.value = r.total
     snippets.value = r.snippets || {}
+    recycledHidden.value = r.recycled_hidden || 0
   } finally {
     loading.value = false
   }
@@ -100,11 +102,18 @@ async function del(row: any) {
   await ElMessageBox.confirm(
     missing
       ? `「${row.current_filename}」的文件已不在磁盘上，把这条失效记录移入回收站？`
-      : `把「${row.current_filename}」移入回收站？`,
-    '删除', { type: 'warning' })
+      : `把「${row.current_filename}」移入回收站？文件搬进回收站，文档库不再显示它。`,
+    '移入回收站', { type: 'warning', confirmButtonText: '移入回收站' })
   const r: any = await http.delete(`/documents/${row.id}`)
-  ElMessage.success(r?.file_missing ? '文件本就缺失，记录已移入回收站' : '已移入回收站（可随时恢复）')
+  ElMessage.success(r?.file_missing
+    ? '文件本就缺失，失效记录已移入回收站，文档库不再显示'
+    : '已移入回收站，文档库不再显示；在回收站可恢复或彻底删除')
   load()
+}
+
+function showRecycled() {
+  filters.value.status = ['recycled']
+  reload()
 }
 
 async function batchExport() {
@@ -217,6 +226,17 @@ onActivated(() => load())
         <el-button size="small" @click="load">刷新</el-button>
       </div>
     </el-card>
+
+    <el-alert v-if="recycledHidden" class="bin-note" type="info" :closable="false" show-icon>
+      <template #title>
+        另有 {{ recycledHidden }} 份文档已移入回收站，不在文档库显示
+        <el-button link type="primary" size="small" @click="$router.push('/recycle')">去回收站</el-button>
+        <el-button link type="primary" size="small" @click="showRecycled">在这里显示</el-button>
+      </template>
+      <template #default>
+        <span class="hint">恢复后回到文档库原位；到期由后台自动清理，也可在回收站立刻彻底删除（保留期在「设置 → 目录与归档」调整）。</span>
+      </template>
+    </el-alert>
 
     <el-card v-loading="loading">
       <el-table v-if="view === 'table'" :data="rows" size="small" @row-dblclick="open"
@@ -359,6 +379,8 @@ onActivated(() => load())
 .doc-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .doc-ops { display: flex; justify-content: space-between; border-top: 1px dashed var(--df-line); padding-top: 4px; }
 .filter-pop { display: flex; flex-direction: column; gap: 8px; }
+.bin-note { margin-bottom: var(--df-gap); }
+.bin-note :deep(.el-alert__title) { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
 .fb { margin-left: 6px; }
 .drawer-ops { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 26px; }
 </style>

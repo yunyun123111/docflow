@@ -13,7 +13,7 @@ from backend.services import ai as ai_service
 from backend.services.confidence import combine, field_coverage
 from backend.services.fields import FIELD_CONTRACT_NO
 from backend.services.fingerprint import fingerprint as make_fp
-from backend.services.rules import RuleHit, evaluate
+from backend.services.rules import RuleHit, evaluate, header_span
 from backend.services.text_norm import normalize_for_match
 
 DOC_STOP = {"其他"}
@@ -45,6 +45,35 @@ def _keyword_score(db: Session, text: str, filename: str) -> tuple[float, int | 
     return min(1.0, stat[cat_id] / 6.0), cat_id
 
 
+def _category_by_name(db: Session, name: str) -> int | None:
+    """类型名 → 同名分类叶子（发票→财务/发票，提货单→业务/提货单）。
+
+    种子规则的 category_id 全是空的，于是分类只能靠关键词计数——合同正文里
+    「付款」「发票」出现得比「合同」还密，合同就被归到了「财务」。类型既然已经
+    判定为发票/提货单/入库单，归档目录就该落回它自己的叶子分类。
+    """
+    if not name:
+        return None
+    rows = db.query(Category).filter(Category.name == name).all()
+    if not rows:
+        return None
+    return max(rows, key=lambda c: (c.path or c.name or "").count("/")).id
+
+
+def _category_by_title(db: Session, filename: str, head: str) -> int | None:
+    """类型只到「合同」时按抬头细分销售/采购/框架/补充协议，与归集角色同一口径。
+
+    分不到叶子，业务包就没有合同锚，缺发票/缺提货单这类必备单据检查一条都对不上。
+    """
+    from backend.services.bundles import TITLE_ROLE_WORDS
+
+    probe = f"{filename}\n{head}"
+    for role, words in TITLE_ROLE_WORDS:
+        if any(w in probe for w in words):
+            return _category_by_name(db, role)
+    return None
+
+
 def _sample_match(db: Session, text: str):
     """样例库指纹命中（同模板文档，零 token）。"""
     fp = make_fp(text)
@@ -66,9 +95,18 @@ def classify(db: Session, filename: str, text: str, extracted: dict) -> Classifi
     sample = _sample_match(db, text)
     sample_score, sample_type, sample_cat = sample if sample else (0.0, "", None)
 
-    doc_type = (rule_hit.rule.document_type if rule_hit else "") or sample_type
+    rule_type = rule_hit.rule.document_type if rule_hit else ""
     cat_from_rule = rule_hit.rule.category_id if rule_hit else None
-    category_id = cat_from_rule or sample_cat or kw_cat
+    # 样例是用户逐份确认过的同模板文档，命中即最强证据。从前它永远排在规则后面，
+    # 于是「把被判成发票的结算单改回来」这种纠正只学进库、从不生效，下一份照样错。
+    sample_wins = bool(sample_type) and sample_score > rule_score
+    doc_type = sample_type if sample_wins else (rule_type or sample_type)
+    head, _head_end = header_span(text)
+    if sample_wins:
+        category_id = sample_cat or cat_from_rule or _category_by_name(db, doc_type)
+    else:
+        category_id = (cat_from_rule or sample_cat or _category_by_title(db, filename, head)
+                       or _category_by_name(db, doc_type) or kw_cat)
 
     ai_score, ai_type, ai_cat, ai_used = 0.0, "", None, False
     uncertain = max(rule_score, sample_score) < 0.75
@@ -104,8 +142,8 @@ def classify(db: Session, filename: str, text: str, extracted: dict) -> Classifi
         confidence = max(confidence, 0.86)
 
     final_type = doc_type or ai_type or "其他"
-    final_cat = category_id or ai_cat
-    if sample and not rule_hit:
+    final_cat = category_id or ai_cat or _category_by_name(db, final_type)
+    if sample_wins:
         confidence = max(confidence, sample_score)
         detail["sample"] = sample_score
 
@@ -116,6 +154,7 @@ def classify(db: Session, filename: str, text: str, extracted: dict) -> Classifi
     return Classification(
         document_type=final_type, category_id=final_cat, category_path=path_name,
         confidence=round(confidence, 4), detail=detail,
-        rule_hits=[{"rule_id": h.rule.id, "name": h.rule.name, "score": h.score} for h in hits],
-        ai_used=ai_used, sample_used=bool(sample and not rule_hit),
+        rule_hits=[{"rule_id": h.rule.id, "name": h.rule.name, "score": h.score,
+                     "where": h.where} for h in hits],
+        ai_used=ai_used, sample_used=sample_wins,
     )

@@ -123,7 +123,8 @@ def test_recycled_document_still_previewable(client, db):
     assert Path(row.current_path).is_file()
     assert Path(row.current_path).resolve().is_relative_to(Path(settings.recycle_root).resolve())
     assert client.get(f"/api/documents/{d.id}").json()["path"] == row.current_path
-    assert client.get("/api/documents", params={"page": 1, "page_size": 50}).json()["items"]
+    # 已回收的不在文档库显示（回收站才是它的家），但记录与路径都还在
+    assert client.get("/api/documents", params={"page": 1, "page_size": 50}).json()["items"] == []
     it = client.get("/api/recycle").json()[0]
     assert it["file_missing"] is False
     # 原位置仍然记得，恢复时能回原
@@ -190,3 +191,132 @@ def test_purge_expired_cleans_lost_records(client, db):
         sdb.commit()
         assert purge_expired(sdb) == 1
         assert sdb.get(Document, d.id) is None
+
+
+def _archived_pdf(db, name="回收隐身.pdf", cat_name="发票", doc_type="发票"):
+    """一份真的在归档位置、状态已归档的文档。"""
+    from backend.config import settings
+    from backend.models import Category, Document
+
+    real = settings.document_root / name
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_bytes(b"%PDF-1.4 recycled")
+    cat = db.query(Category).filter(Category.name == cat_name).first()
+    d = Document(original_filename=name, current_filename=name,
+                 original_path=str(real), current_path=str(real), file_type="pdf",
+                 document_type=doc_type, status="archived",
+                 archived_category_id=cat.id if cat else None, confidence=0.9)
+    db.add(d)
+    db.commit()
+    return d, real
+
+
+def _leaf(tree, name):
+    for n in tree:
+        if n["name"] == name:
+            return n
+        hit = _leaf(n.get("children") or [], name)
+        if hit:
+            return hit
+    return None
+
+
+def test_recycled_document_leaves_the_library(client, db):
+    """移入回收站 = 从文档库消失：列表、类型下拉、目录计数、看板都不再算它。"""
+    d, _ = _archived_pdf(db)
+    assert d.id in [x["id"] for x in client.get("/api/documents").json()["items"]]
+
+    client.delete(f"/api/documents/{d.id}")
+    body = client.get("/api/documents").json()
+    assert body["items"] == [] and body["total"] == 0, body
+    assert body["recycled_hidden"] == 1, "隐身了也要告诉用户去哪找，别让人以为被物理删除"
+    assert d.id in [i["document_id"] for i in client.get("/api/recycle").json()]
+
+    seen = client.get("/api/documents", params={"status": "recycled"}).json()
+    assert [x["id"] for x in seen["items"]] == [d.id]
+    assert seen["recycled_hidden"] == 0
+
+    assert client.get("/api/documents", params={"q": "回收隐身"}).json()["items"] == []
+    assert client.get("/api/documents", params={"document_type": "发票"}).json()["items"] == []
+    assert "发票" not in client.get("/api/documents/types").json()
+    assert client.get("/api/documents/suggest", params={"keyword": "回收隐身"}).json() == []
+    assert _leaf(client.get("/api/categories/tree").json(), "发票")["doc_count"] == 0
+    assert client.get("/api/dashboard/overview").json()["total"] == 0
+
+
+def test_restore_returns_doc_to_library_and_old_status(client, db):
+    """恢复要回到进回收站之前的状态：已归档的回归档，不用重新整理一遍。"""
+    from backend.models import Document
+
+    d, real = _archived_pdf(db, name="恢复回归档.pdf")
+    item_id = client.delete(f"/api/documents/{d.id}").json()["recycle_id"]
+    assert not real.exists()
+
+    r = client.post(f"/api/recycle/{item_id}/restore")
+    assert r.status_code == 200, r.text
+    db.expire_all()
+    row = db.get(Document, d.id)
+    assert row.status == "archived", row.status
+    assert Path(row.current_path) == real and real.is_file()
+    assert d.id in [x["id"] for x in client.get("/api/documents").json()["items"]]
+    assert client.get("/api/documents").json()["recycled_hidden"] == 0
+    assert client.get("/api/dashboard/overview").json()["total"] == 1
+
+
+def test_restore_pending_doc_stays_pending(client, db):
+    """待整理的文档回收再恢复，不该被凭空升级成已归档。"""
+    from backend.config import settings
+    from backend.models import Document
+
+    p = settings.inbox_root / "恢复待整理.pdf"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"%PDF-1.4 x")
+    d = Document(original_filename=p.name, current_filename=p.name, original_path=str(p),
+                 current_path=str(p), file_type="pdf", status="pending")
+    db.add(d)
+    db.commit()
+    iid = client.delete(f"/api/documents/{d.id}").json()["recycle_id"]
+    assert client.get("/api/recycle").json()[0]["prev_status"] == "pending"
+    client.post(f"/api/recycle/{iid}/restore")
+    db.expire_all()
+    assert db.get(Document, d.id).status == "pending"
+
+
+def test_cannot_undo_while_recycled(client, db):
+    """撤销会把文件从回收站里搬走，却留下一个恢复不了的回收记录——必须先恢复。"""
+    from backend.models import Document
+
+    d, _ = _archived_pdf(db, name="回收中撤销.pdf")
+    from backend.config import settings
+    from backend.models import OperationLog
+
+    db.add(OperationLog(document_id=d.id, op="archive", result="ok",
+                       old_path=str(settings.inbox_root / d.original_filename),
+                       new_path=str(Path(d.current_path))))
+    db.commit()
+    iid = client.delete(f"/api/documents/{d.id}").json()["recycle_id"]
+
+    r = client.post("/api/documents/batch-undo", json={"ids": [d.id]})
+    assert r.status_code == 200 and not r.json()["done"], r.text
+    assert "回收站" in str(r.json()["errors"]), r.json()
+    db.expire_all()
+    assert db.get(Document, d.id).status == "recycled"
+
+    assert client.post(f"/api/recycle/{iid}/restore").status_code == 200
+    db.expire_all()
+    out = client.post("/api/documents/batch-undo", json={"ids": [d.id]}).json()
+    assert [x["id"] for x in out["done"]] == [d.id], out
+
+
+def test_legacy_recycle_row_restores_to_pending(client, db):
+    """老库的回收记录没有 prev_status：退回待整理，不要报错，也不要谎称已归档。"""
+    from backend.models import Document, RecycleItem
+
+    d, _ = _archived_pdf(db, name="老记录恢复.pdf")
+    iid = client.delete(f"/api/documents/{d.id}").json()["recycle_id"]
+    with db.no_autoflush:
+        db.get(RecycleItem, iid).prev_status = ""
+        db.commit()
+    assert client.post(f"/api/recycle/{iid}/restore").status_code == 200
+    db.expire_all()
+    assert db.get(Document, d.id).status == "pending"

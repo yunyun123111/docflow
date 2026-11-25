@@ -26,8 +26,11 @@ def tree(db: Session = Depends(get_db)):
         children.setdefault(c.parent_id, []).append(c)
     from sqlalchemy import func
 
+    from backend.models import STATUS_RECYCLED
+
     counts = dict(db.query(Document.archived_category_id, func.count(Document.id))
-                  .filter(Document.archived_category_id.isnot(None))
+                  .filter(Document.archived_category_id.isnot(None),
+                          Document.status != STATUS_RECYCLED)
                   .group_by(Document.archived_category_id).all())
     return [_node(c, children, counts) for c in children.get(None, [])]
 
@@ -87,8 +90,13 @@ def delete(cat_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "不存在")
     if db.query(Category).filter(Category.parent_id == cat_id).count():
         raise HTTPException(400, "请先删除子分类")
-    if db.query(Document).filter(Document.archived_category_id == cat_id).count():
-        raise HTTPException(400, "该分类下已有归档文档，不能删除")
+    held = db.query(Document).filter(Document.archived_category_id == cat_id).all()
+    if held:
+        from backend.models import STATUS_RECYCLED
+
+        in_bin = sum(1 for d in held if d.status == STATUS_RECYCLED)
+        extra = f"（含回收站中 {in_bin} 份，恢复后会回到这里）" if in_bin else ""
+        raise HTTPException(400, f"该分类下还挂着 {len(held)} 份文档{extra}，不能删除")
     db.query(ClassifyRule).filter(ClassifyRule.category_id == cat_id).update({"category_id": None})
     db.delete(c)
     db.commit()

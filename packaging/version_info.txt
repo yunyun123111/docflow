@@ -15,12 +15,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'DocFlow'),
         StringStruct('FileDescription', 'DocFlow 文流 · 智能文档整理'),
-        StringStruct('FileVersion', '2.3.0'),
+        StringStruct('FileVersion', '2.3.3'),
         StringStruct('InternalName', 'DocFlow'),
         StringStruct('LegalCopyright', '本地优先，数据不出机器'),
         StringStruct('OriginalFilename', 'DocFlow.exe'),
         StringStruct('ProductName', 'DocFlow'),
-        StringStruct('ProductVersion', '2.3.0')
+        StringStruct('ProductVersion', '2.3.3')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

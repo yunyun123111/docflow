@@ -21,6 +21,7 @@ def _out(i: RecycleItem) -> dict:
     return {"id": i.id, "document_id": i.document_id, "name": i.name, "reason": i.reason,
              "file_type": get_file_type(Path(i.name)) if i.name else "",
              "original_path": i.original_path, "file_missing": svc.item_file_missing(i),
+             "prev_status": i.prev_status or "",
              "created_at": i.created_at.isoformat(timespec="seconds"),
              "expires_at": i.expires_at.isoformat(timespec="seconds") if i.expires_at else None}
 

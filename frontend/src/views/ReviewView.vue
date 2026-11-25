@@ -100,8 +100,10 @@ async function skip() {
 async function recycle() {
   const d = activeDoc.value
   if (!d) return
-  await ElMessageBox.confirm(`把「${d.filename}」移入回收站？`, '删除', { type: 'warning' })
+  await ElMessageBox.confirm(`把「${d.filename}」移入回收站？文件搬进回收站，文档库不再显示它。`,
+    '移入回收站', { type: 'warning', confirmButtonText: '移入回收站' })
   await http.delete(`/documents/${d.id}`)
+  ElMessage.success('已移入回收站，文档库不再显示；在回收站可恢复或彻底删除')
   await step(1)
   await loadQueue()
 }

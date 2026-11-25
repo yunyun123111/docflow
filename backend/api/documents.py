@@ -13,7 +13,7 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models import (
     Category, Document, DocumentField, DocumentText, OperationLog,
-    STATUS_ARCHIVED, STATUS_DUPLICATE, STATUS_NEED_REVIEW,
+    STATUS_ARCHIVED, STATUS_DUPLICATE, STATUS_NEED_REVIEW, STATUS_RECYCLED,
 )
 from backend.schemas import (
     BatchDeleteRequest, BatchIds, DocumentPatchRequest, ExportZipRequest, RenameRequest,
@@ -66,48 +66,65 @@ async def upload_documents(request: Request, files: list[UploadFile] = File(...)
             "job": {"id": job.id, "total": job.total}}
 
 
+def _recycled_hidden(db: Session, common: list) -> int:
+    """同一批筛选条件下被文档库隐藏掉的回收站记录数（让人知道东西没丢，只是搬家了）。"""
+    from sqlalchemy import func
+
+    return db.query(func.count(Document.id)).filter(*common,
+                                                    Document.status == STATUS_RECYCLED).scalar() or 0
+
+
 @router.get("")
 def list_documents(db: Session = Depends(get_db),
                    status: str | None = None, document_type: str | None = None,
                    category_id: int | None = None, file_type: str | None = None,
                    q: str = "", date_from: str = "", date_to: str = "",
                    limit: int = Query(100, le=500), offset: int = 0):
-    query = db.query(Document)
+    """文档库列表。已回收的记录默认不出现——回收站才是它们的家，恢复后自动回到这里；
+    需要按状态看它们在库里长什么样时，显式传 `status=recycled`。"""
+    common = []
     snippets: dict[int, str] = {}
     if q:
         ids, snippets = search_service.search_ids(db, q)
         if not ids:
-            return {"items": [], "total": 0, "snippets": {}}
-        query = query.filter(Document.id.in_(ids))
-    if status:
-        query = query.filter(Document.status.in_([s for s in status.split(",") if s]))
+            return {"items": [], "total": 0, "snippets": {}, "recycled_hidden": 0}
+        common.append(Document.id.in_(ids))
     if document_type:
-        query = query.filter(Document.document_type == document_type)
+        common.append(Document.document_type == document_type)
     if file_type:
-        query = query.filter(Document.file_type == file_type)
+        common.append(Document.file_type == file_type)
     if category_id:
-        query = query.filter((Document.archived_category_id == category_id)
-                             | (Document.suggested_category_id == category_id))
+        common.append((Document.archived_category_id == category_id)
+                      | (Document.suggested_category_id == category_id))
     if date_from:
-        query = query.filter(Document.created_at >= f"{date_from} 00:00:00")
+        common.append(Document.created_at >= f"{date_from} 00:00:00")
     if date_to:
-        query = query.filter(Document.created_at <= f"{date_to} 23:59:59")
+        common.append(Document.created_at <= f"{date_to} 23:59:59")
+    wanted = [s for s in (status or "").split(",") if s]
+    scoped = db.query(Document).filter(*common)
+    if wanted:
+        query = scoped.filter(Document.status.in_(wanted))
+    else:
+        query = scoped.filter(Document.status != STATUS_RECYCLED)
     total = query.count()
     rows = query.order_by(Document.id.desc()).offset(offset).limit(limit).all()
-    return {"items": [_brief(d) for d in rows], "total": total, "snippets": snippets}
+    return {"items": [_brief(d) for d in rows], "total": total, "snippets": snippets,
+            "recycled_hidden": 0 if STATUS_RECYCLED in wanted else _recycled_hidden(db, common)}
 
 
 @router.get("/suggest")
 def suggest(keyword: str, db: Session = Depends(get_db)):
     ids, _ = search_service.search_ids(db, keyword)
-    rows = db.query(Document).filter(Document.id.in_(ids[:20])).all() if ids else []
+    rows = db.query(Document).filter(Document.id.in_(ids[:20]),
+                                     Document.status != STATUS_RECYCLED).all() if ids else []
     return [{"id": d.id, "name": d.current_filename or d.original_filename,
              "type": d.document_type, "status": d.status} for d in rows]
 
 
 @router.get("/types")
 def list_types(db: Session = Depends(get_db)):
-    rows = db.query(Document.document_type).filter(Document.document_type != "") \
+    rows = db.query(Document.document_type) \
+        .filter(Document.document_type != "", Document.status != STATUS_RECYCLED) \
         .distinct().order_by(Document.document_type).all()
     return [r[0] for r in rows]
 
@@ -232,8 +249,9 @@ def reprocess_document(doc_id: int, db: Session = Depends(get_db)):
     doc.status = "pending"
     doc.error = ""
     db.commit()
-    pipeline.start_files_job(db, [p], kind="reprocess", source=f"doc:{doc_id}")
-    return {"ok": True}
+    # in_place：原地重跑这一条记录，别让它被自己的 sha256 判成重复
+    job = pipeline.start_files_job(db, [p], kind="reprocess", source=f"doc:{doc_id}", in_place=True)
+    return {"ok": True, "job_id": job.id}
 
 
 @router.delete("/{doc_id}")

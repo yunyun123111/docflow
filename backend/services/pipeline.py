@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from backend.database import SessionLocal
@@ -22,7 +22,7 @@ from backend.config import settings
 from backend.models import (
     Document, DocumentField, DocumentText, OperationLog, ProcessingJob,
     STATUS_ARCHIVED, STATUS_DUPLICATE, STATUS_FAILED, STATUS_NEED_REVIEW,
-    STATUS_PENDING, STATUS_PROCESSING,
+    STATUS_PENDING, STATUS_PROCESSING, STATUS_RECYCLED,
 )
 from backend.services import fields as fields_service
 from backend.services.archive import log_operation, move_file, sha256_file
@@ -92,9 +92,15 @@ class Pipeline:
         return self._launch(db, files, str(src), kind)
 
     def start_files_job(self, db: Session, files: list[Path], kind: str = "upload",
-                        source: str = "", hints: dict[str, str] | None = None) -> ProcessingJob:
-        """显式文件列表（上传/监控/邮箱共用）；hints=路径→分类提示。"""
-        return self._launch(db, files, source or "upload", kind, hints=hints)
+                        source: str = "", hints: dict[str, str] | None = None,
+                        in_place: bool = False) -> ProcessingJob:
+        """显式文件列表（上传/监控/邮箱共用）；hints=路径→分类提示。
+
+        in_place=True 是「重新识别」：文件早就入库了，路径和内容都没变，必须原地
+        重跑并保住原来那条记录。若照常走 register，它会用自己的 sha256 把自己判成
+        重复——旧记录永远停在 pending，还凭空多一条 duplicate，包里的条目也接不上。
+        """
+        return self._launch(db, files, source or "upload", kind, hints=hints, in_place=in_place)
 
     def _drop_known(self, db: Session, files: list[Path]) -> list[Path]:
         """跳过已定性（归档/审核/重复）且内容相同的路径；同名不同内容仍处理。"""
@@ -117,7 +123,8 @@ class Pipeline:
         return kept
 
     def _launch(self, db: Session, files: list[Path], source: str, kind: str,
-                hints: dict[str, str] | None = None) -> ProcessingJob:
+                hints: dict[str, str] | None = None,
+                in_place: bool = False) -> ProcessingJob:
         job = ProcessingJob(source=source, kind=kind, total=len(files), status="running")
         db.add(job)
         db.commit()
@@ -125,7 +132,8 @@ class Pipeline:
         cancel = threading.Event()
         with self._lock:
             self._cancel[job.id] = cancel
-        t = threading.Thread(target=self._run, args=(job.id, files, cancel, hints or {}),
+        t = threading.Thread(target=self._run,
+                             args=(job.id, files, cancel, hints or {}, in_place),
                              name=f"pipeline-{job.id}", daemon=True)
         with self._lock:
             self._threads[job.id] = t
@@ -142,13 +150,14 @@ class Pipeline:
 
     # ---------- worker ----------
     def _run(self, job_id: int, files: list[Path], cancel: threading.Event,
-             hints: dict[str, str]) -> None:
+             hints: dict[str, str], in_place: bool = False) -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         workers = max(1, min(settings.MAX_WORKERS, len(files) or 1))
         try:
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = {ex.submit(self._one, job_id, p, cancel, hints.get(str(p), "")): p for p in files}
+                futs = {ex.submit(self._one, job_id, p, cancel, hints.get(str(p), ""), in_place): p
+                        for p in files}
                 for fut in as_completed(futs):
                     if cancel.is_set():
                         break
@@ -167,12 +176,13 @@ class Pipeline:
                 self._cancel.pop(job_id, None)
                 self._threads.pop(job_id, None)
 
-    def _one(self, job_id: int, path: Path, cancel: threading.Event, hint: str = "") -> None:
+    def _one(self, job_id: int, path: Path, cancel: threading.Event, hint: str = "",
+             in_place: bool = False) -> None:
         if cancel.is_set():
             return
         with SessionLocal() as db:
             try:
-                self.process_file(db, path, job_id, category_hint=hint)
+                self.process_file(db, path, job_id, category_hint=hint, in_place=in_place)
             except Exception as e:  # noqa: BLE001
                 logger.exception("处理失败 %s: %s", path, e)
                 db.rollback()
@@ -180,9 +190,9 @@ class Pipeline:
 
     # ---------- 单文件核心（上传/批量/监控/邮箱共用） ----------
     def process_file(self, db: Session, path: Path, job_id: int | None = None,
-                     category_hint: str = "") -> Document | None:
+                     category_hint: str = "", in_place: bool = False) -> Document | None:
         """单文件全流程；重复内容只记 duplicate 并计数。category_hint 来自邮箱主题路由。"""
-        doc = self.register(db, path, job_id)
+        doc = self.register(db, path, job_id, in_place=in_place)
         if doc is None:
             self._bump(db, job_id, "failed")
             return None
@@ -192,10 +202,25 @@ class Pipeline:
             return doc
         return self.recognize(db, doc, job_id, category_hint=category_hint)
 
-    def register(self, db: Session, path: Path, job_id: int | None = None) -> Document | None:
-        """入库登记 + 去重。返回新 Document；重复内容返回 duplicate 记录。"""
+    def register(self, db: Session, path: Path, job_id: int | None = None,
+                 in_place: bool = False) -> Document | None:
+        """入库登记 + 去重。返回新 Document；重复内容返回 duplicate 记录。
+
+        in_place 时按路径认领已存在的记录（含刚进回收站的，重识别等于把它捞回来）。
+        """
         if not path.is_file():
             return None
+        if in_place:
+            target = str(path)
+            mine = (db.query(Document)
+                    .filter(or_(Document.current_path == target, Document.original_path == target))
+                    .order_by(Document.status == STATUS_RECYCLED, Document.id.desc()).first())
+            if mine is not None:
+                mine.status = STATUS_PENDING
+                mine.error = ""
+                mine.job_id = job_id
+                db.commit()
+                return mine
         ftype = get_file_type(path)
         if ftype == "unknown":
             return None
@@ -204,8 +229,10 @@ class Pipeline:
         except OSError as e:
             logger.warning("读取失败 %s: %s", path, e)
             return None
-        twin = db.query(Document).filter(Document.sha256 == digest).filter(
-            Document.status.notin_(["recycled"])).first()
+        twin = (db.query(Document).filter(Document.sha256 == digest)
+                .filter(Document.status.notin_([STATUS_RECYCLED]))
+                .order_by(Document.status.in_([STATUS_ARCHIVED, STATUS_NEED_REVIEW]).desc(),
+                          Document.id.desc()).first())
         if twin:
             dup = Document(original_filename=path.name, current_filename=path.name,
                            original_path=str(path), current_path=str(path),
@@ -248,8 +275,11 @@ class Pipeline:
 
         db.merge(DocumentText(document_id=doc.id, text=parsed.text,
                               text_spaced=space_cjk(parsed.text)))
-        extracted = fields_service.extract(doc.current_filename or doc.original_filename, parsed.text)
-        cls = classify(db, doc.current_filename or doc.original_filename, parsed.text, extracted.values)
+        # 证据只用用户上传时的原始名：current_filename 是上一次识别自己拼出来的，
+        # 拿它再喂回去，被判成「发票_20260512_…pdf」的合同就永远翻不回来。
+        probe_name = doc.original_filename or doc.current_filename or ""
+        extracted = fields_service.extract(probe_name, parsed.text)
+        cls = classify(db, probe_name, parsed.text, extracted.values)
         doc.document_type = cls.document_type
         doc.suggested_category_id = cls.category_id
         doc.title = (doc.current_filename or doc.original_filename).rsplit(".", 1)[0]
@@ -259,6 +289,10 @@ class Pipeline:
         doc.has_seal = seal_check(path, doc.file_type)
         for name, (value, conf) in extracted.values.items():
             self._set_field(db, doc.id, name, str(value), "rule", conf)
+        # 上一轮误判写错的字段必须清掉：重新识别只覆盖同名项，不删就会一直挂着假的「公司名称/金额」
+        for stale in [x for x in doc.fields
+                      if x.source != "manual" and x.name not in extracted.values]:
+            db.delete(stale)
         doc.processed_at = datetime.now()
 
         if category_hint:
@@ -342,12 +376,18 @@ class Pipeline:
         f = db.query(DocumentField).filter(DocumentField.document_id == doc_id,
                                            DocumentField.name == name).first()
         if f:
+            if f.source == "manual" and source != "manual":
+                return   # 人工填过的值优先：重新识别不该把用户手工修正冲回规则值
             f.value, f.source, f.confidence = value[:500], source, conf
         else:
             db.add(DocumentField(document_id=doc_id, name=name, value=value[:500], source=source, confidence=conf))
 
     def _fields_map(self, db: Session, doc: Document) -> dict:
-        return {f.name: (f.value, f.confidence) for f in doc.fields}
+        """直接查库：同一 session 里刚写入的字段不会自动进 doc.fields 关系缓存，
+        渲染命名时读到旧集合就会漏掉合同号，文件名里留下 .pdf-1 这种上传残留。
+        """
+        rows = db.query(DocumentField).filter(DocumentField.document_id == doc.id).all()
+        return {f.name: (f.value, f.confidence) for f in rows}
 
     COUNTERS = ("archived", "need_review", "duplicate", "failed")
 

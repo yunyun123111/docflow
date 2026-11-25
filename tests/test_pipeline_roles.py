@@ -124,6 +124,123 @@ def test_purchase_bundle_requires_instock(client, db):
     assert sorted(rep["completeness"]["missing"]) == ["发票", "结算单"]
 
 
+# 真实业务文档：标题写着「矿石销售合同」，正文里到处是发票/结算/提货字样（合同条款必然要写）
+ORE_SALE = ("矿石销售合同\n签约地点：山西省临汾市尧都区\n乙方：山西宏达钢铁有限公司（买方）\n"
+            "签约时间：2026年5月12日\n合同编号：HSYCXS（DD）-2026-0236\n"
+            "一、标的物：PB粉 10000吨，合同车板现汇含税价 799.05 元/吨。\n"
+            "二、结算方式：货到验收后30天内电汇，乙方凭甲方开具的增值税发票付款。\n"
+            "三、提货方式：乙方自提，提货费用由乙方承担。\n")
+ORE_SETTLE = ("华山云创供应链科技（山西）有限公司销售结算单\nTo:\n山西宏达钢铁有限公司\nDate:\n"
+              "2026/6/25\n贵我双方合同HSYCXS（DD）-2026-0236下，10000吨PB粉提货完毕，结算如下：\n"
+              "最终结算单价 799.09 元/吨，请据此开具发票\n")
+
+
+def test_body_mentions_do_not_steal_the_type(client, db):
+    """正文提到「发票」不等于这份文件是发票——合同条款必然写着开票与提货。
+
+    真实翻车样本：一份矿石销售合同被识别成发票（发票规则 0.92 > 合同 0.90），
+    整笔业务因此没有合同锚，归集与必备单据检查全断。
+    """
+    _ingest(client, "6110", {"a7f3c91b2d.txt": ORE_SALE, "b8e4d02c3e.txt": ORE_SETTLE})
+
+    sale = _doc(db, "a7f3c91b2d.txt")
+    settle = _doc(db, "b8e4d02c3e.txt")
+    assert sale.document_type == "合同", (sale.document_type, sale.confidence_detail)
+    assert settle.document_type == "结算单", (settle.document_type, settle.confidence_detail)
+    # 分类要落到合同叶子：归档目录和业务角色都从这里来
+
+    assert db.get(Category, sale.archived_category_id).path == "合同/销售合同"
+    assert db.get(Category, settle.archived_category_id).path == "合同/结算单"
+    assert bundle_service.derive_role(db, sale) == "销售合同"
+    assert bundle_service.derive_role(db, settle) == "结算单"
+
+    from backend.models import DocumentField
+
+    fmap = {f.name: f.value for f in db.query(DocumentField).filter_by(document_id=sale.id).all()}
+    # 合同没有明示总额时按单价×数量补，绝不能把 799.05 当成交金额（对账会报假差异）
+    assert fmap["金额"] == "7990500.00", fmap
+    assert fmap["单价"] == "799.05", fmap
+
+    bid = svc.bundle_for_contract(db, "HSYCXS（DD）-2026-0236").id
+    detail = bundle_service.get_bundle_detail(db, bid)
+    roles = {a["role"] for g in detail["groups"] for a in g["anchors"]}
+    atts = {a["role"] for g in detail["groups"] for a in g["attachments"]}
+    assert roles == {"销售合同"}, roles
+    assert atts == {"结算单"}, atts
+    assert sorted(detail["groups"][0]["missing"]) == ["发票", "提货单"], detail["completeness"]
+
+
+def test_contract_no_from_filename_only(client, db):
+    """扫描件正文里常常一个编号都没有，编号只在文件名：HSYCXS（DD）-2026-0236。
+
+    短号正则不认全角括号时只能拿到 HSYCXS，同系列的合同会被塞进同一个业务包。
+    """
+    from backend.models import DocumentField
+
+    cno = "HSYCXS（DD）-2026-0248"
+    body = ORE_SALE.replace("合同编号：HSYCXS（DD）-2026-0236", "签约主体：华北矿业有限公司")
+    _ingest(client, "6112", {f"{cno}.txt": body})
+
+    doc = _doc(db, f"{cno}.txt")
+    assert doc.document_type == "合同"
+    got = db.query(DocumentField).filter(DocumentField.document_id == doc.id,
+                                         DocumentField.name == "合同编号").first()
+    assert got and got.value == cno, got.value if got else None
+    assert svc.bundle_for_contract(db, cno) is not None
+    # 文件名就是合同号时别再叠一遍，也不要留 .pdf-1 这类上传残留
+    assert doc.current_filename.count("HSYCXS") == 1, doc.current_filename
+    assert not doc.current_filename.endswith(".txt.txt"), doc.current_filename
+
+
+def test_reprocess_reruns_in_place(client, db):
+    """重新识别必须原地重跑。
+
+    以前它会把这条记录自己的 sha256 当成「与另一条重复」，结果旧记录卡在 pending、
+    凭空多一条 duplicate，用户点完「重新识别」看到的仍是错的类型。
+    """
+    cno = "XS-2026-6113"
+    _ingest(client, "6113", {f"销售合同_{cno}.txt": SALE.format(cno=cno)})
+    doc = _doc(db, f"销售合同_{cno}.txt")
+    doc_id = doc.id
+    before = db.query(Document).count()
+
+    r = client.post(f"/api/documents/{doc_id}/reprocess")
+    assert r.status_code == 200, r.text
+    _wait_job(client, r.json()["job_id"])
+
+    db.expire_all()
+    assert db.query(Document).count() == before, "重新识别不该新增记录"
+    assert not db.query(Document).filter(Document.status == "duplicate").all()
+    fresh = db.get(Document, doc_id)
+    assert fresh.status == "archived", (fresh.status, fresh.error)
+    assert fresh.document_type == "合同"
+    assert fresh.archived_category_id == doc.archived_category_id
+    # 命名用的字段必须是这一轮刚写进去的，不能是关系缓存里的旧集合
+    assert fresh.current_filename.count(cno) == 1, fresh.current_filename
+    assert not fresh.current_filename.endswith((".txt.txt", ".pdf.pdf")), fresh.current_filename
+
+
+def test_saved_sample_beats_generic_rule(client, db):
+    """用户确认过的同模板样例必须压过通用规则，否则改了也白改。
+
+    这条正文抬手里没有结算单字样，规则只会说它是合同；样例说了算。
+    """
+    from backend.models import Category, DocumentSample
+    from backend.services.fingerprint import fingerprint as make_fp
+
+    cat = db.query(Category).filter(Category.path == "合同/结算单").first()
+    text = ("华山云创供应链科技（山西）有限公司\nTo:\n山西宏达钢铁有限公司\nDate:\n"
+            "贵我双方合同HSYCXS（DD）-2026-0247下10000吨PB粉完毕，明细如下：\n"
+            "最终单价 799.09 元/吨，请据此开具发票\n")
+    db.add(DocumentSample(name="已确认模板", path="sample://6111", document_type="结算单",
+                          category_id=cat.id, text_norm=make_fp(text)))
+    db.commit()
+    _ingest(client, "6111", {"c9f5e13d4f.txt": text})
+
+    doc = _doc(db, "c9f5e13d4f.txt")
+    assert doc.document_type == "结算单", (doc.document_type, doc.confidence_detail)
+
+
 def test_generic_contract_role_from_title(db):
     """分类只到父级「合同」时，靠标题证据分出销售/采购，必备清单才匹配得上。"""
     parent = db.query(Category).filter(Category.parent_id.is_(None),
@@ -203,3 +320,30 @@ def test_batch_counters_do_not_lose_increments(db):
     j = db.get(ProcessingJob, job_id)
     assert j.archived == 24, f"丢了 {24 - j.archived} 次增量"
     assert j.processed == 24
+
+def test_reprocess_clears_stale_rule_fields(client, db):
+    """重新识别要清掉上一轮规则留下的字段，但不能动人工修正过的值。
+
+    只覆盖同名项的话，误判当年写进去的假「公司名称」会一直挂着，归集与对账都吃它。
+    """
+    from backend.models import DocumentField
+
+    cno = "XS-2026-6114"
+    _ingest(client, "6114", {f"销售合同_{cno}.txt": SALE.format(cno=cno)})
+    doc = _doc(db, f"销售合同_{cno}.txt")
+    # 陈旧字段：这一轮抽取不出「项目名称」；人工字段：金额是用户自己填的
+    db.add(DocumentField(document_id=doc.id, name="项目名称", value="老项目",
+                         source="rule", confidence=0.7))
+    db.query(DocumentField).filter_by(document_id=doc.id, name="金额").update(
+        {"value": "123456.00", "source": "manual", "confidence": 1.0})
+    db.commit()
+
+    r = client.post(f"/api/documents/{doc.id}/reprocess")
+    assert r.status_code == 200, r.text
+    _wait_job(client, r.json()["job_id"])
+    db.expire_all()
+    got = {f.name: (f.value, f.source)
+           for f in db.query(DocumentField).filter_by(document_id=doc.id).all()}
+    assert "项目名称" not in got, got
+    assert got["金额"] == ("123456.00", "manual"), got
+    assert got["合同编号"] == (cno, "rule"), got

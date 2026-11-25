@@ -210,6 +210,7 @@ class RecycleItem(Base):
     original_path: Mapped[str] = mapped_column(String(1024), default="")
     recycled_path: Mapped[str] = mapped_column(String(1024), default="")
     reason: Mapped[str] = mapped_column(String(200), default="")
+    prev_status: Mapped[str] = mapped_column(String(20), default="")   # 进回收站前的状态，恢复时用
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 

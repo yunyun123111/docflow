@@ -19,7 +19,7 @@ RES_DIR = Path(str(getattr(sys, '_MEIPASS', str(Path(__file__).resolve().parent.
 # BASE_DIR：可写数据根。打包后落在 %LOCALAPPDATA%\DocFlow，换 exe 不丢数据、不需要管理员权限
 _HOME = RES_DIR if not IS_FROZEN else Path(os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())) / 'DocFlow'
 BASE_DIR = Path(os.environ.get('DOCFLOW_HOME') or str(_HOME))
-VERSION = '2.3.0'
+VERSION = '2.3.3'
 
 
 class Settings(BaseSettings):
@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     RECON_INTERVAL_MINUTES: int = 360
 
     # 文档归集：采购/销售合并建议的阈值
+    # 本公司名称：区分「我方 / 对方」的唯一可靠依据。留空时只能按文中出现顺序猜，
+    # 业务包的客户与我方主体可能同值，合并建议也比不出是不是同一家公司。
+    OUR_COMPANY: str = ""
     BUNDLE_MERGE_SUGGEST_ENABLED: bool = True
     BUNDLE_MERGE_AMOUNT_TOLERANCE: float = 0.05     # 相对差 ≤ 5%
     BUNDLE_MERGE_DATE_WINDOW_DAYS: int = 30         # 签订日期相距 ≤ 30 天

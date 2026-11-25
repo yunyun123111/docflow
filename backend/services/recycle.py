@@ -11,7 +11,9 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from backend.config import settings
-from backend.models import Document, RecycleItem, DocumentText, STATUS_RECYCLED, STATUS_FAILED
+from backend.models import (
+    Document, RecycleItem, DocumentText, STATUS_ARCHIVED, STATUS_FAILED, STATUS_RECYCLED,
+)
 from backend.services.archive import FileOpError, log_operation, move_file, os_remove
 from backend.utils.fs import unique_filename
 from backend.utils.logger import get_logger
@@ -71,7 +73,7 @@ def to_recycle(db: Session, doc: Document, reason: str = "手动删除") -> Recy
     item = RecycleItem(
         document_id=doc.id, name=src.name, original_path=old,
         recycled_path=str(target) if target else "",
-        reason=f"{reason}{note}", created_at=now,
+        reason=f"{reason}{note}", created_at=now, prev_status=doc.status or "",
         expires_at=now + timedelta(days=retention) if retention > 0 else None,
     )
     db.add(item)
@@ -80,6 +82,17 @@ def to_recycle(db: Session, doc: Document, reason: str = "手动删除") -> Recy
                   new_path=str(target) if target else "", detail=f"{reason}{note}")
     db.commit()
     return item
+
+
+def _back_status(db: Session, doc: Document, prev: str) -> str:
+    """恢复后该是什么状态：原本已归档就回归档，老记录没留 prev_status 就退回「待整理」。"""
+    from backend.models import Category
+
+    if prev != STATUS_ARCHIVED:
+        return prev or "pending"
+    if doc.archived_category_id and db.get(Category, doc.archived_category_id) is None:
+        return "pending"        # 归档分类已经不在了，别挂一个不存在的目录
+    return STATUS_ARCHIVED
 
 
 def restore(db: Session, item: RecycleItem) -> Document | None:
@@ -96,7 +109,14 @@ def restore(db: Session, item: RecycleItem) -> Document | None:
     if doc:
         doc.current_path = str(target)
         doc.current_filename = target.name
-        doc.status = "pending"
+        doc.status = _back_status(db, doc, item.prev_status)
+        if doc.status == STATUS_ARCHIVED:
+            try:
+                from backend.services import bundles as bundle_service
+
+                bundle_service.attach_document(db, doc)   # 重新计入业务包与齐备度
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("恢复后重新入包失败 doc=%s: %s", doc.id, exc)
     log_operation(db, "restore", document_id=doc.id if doc else None,
                   old_path=str(src), new_path=str(target), detail=item.reason)
     db.delete(item)
