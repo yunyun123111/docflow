@@ -1,0 +1,28 @@
+# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 3, 0, 0),
+    prodvers=(2, 3, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404B0', [
+        StringStruct('CompanyName', 'DocFlow'),
+        StringStruct('FileDescription', 'DocFlow 文流 · 智能文档整理'),
+        StringStruct('FileVersion', '2.3.0'),
+        StringStruct('InternalName', 'DocFlow'),
+        StringStruct('LegalCopyright', '本地优先，数据不出机器'),
+        StringStruct('OriginalFilename', 'DocFlow.exe'),
+        StringStruct('ProductName', 'DocFlow'),
+        StringStruct('ProductVersion', '2.3.0')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
