@@ -179,7 +179,7 @@ if ($gh) {
     }
     # 先删同名旧资产再上传（API 上传大文件走 uploads.github.com）
     foreach ($a in $rel.assets) {
-        if ($a.name -eq $zipName) { Invoke-RestMethod -Method Delete -Uri $a.upload_url -Headers $hdr | Out-Null }
+        if ($a.name -eq $zipName -and $a.url) { Invoke-RestMethod -Method Delete -Uri $a.url -Headers $hdr -TimeoutSec 30 | Out-Null }
     }
     $upUrl = "https://uploads.github.com/repos/$Repo/releases/$($rel.id)/assets?name=$zipName"
     # 大文件用 .NET HttpClient 流式上传（长超时、分块读取），避免 Invoke-RestMethod -InFile 卡死
