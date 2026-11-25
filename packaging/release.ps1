@@ -107,6 +107,11 @@ $shaBytes = [Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::Read
 $size = (Get-Item $zip).Length
 $builtAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 if ($Notes -eq "") { $Notes = "DocFlow 桌面版 $tag" }
+if (-not $Repo) {
+    $u = (& git -C $root remote get-url origin 2>$null)
+    if ($u) { $Repo = ($u -replace '^.*github\.com[:/]', '' -replace '\.git$', '') }
+}
+$dlUrl = if ($Repo) { "https://github.com/$Repo/releases/latest" } else { "https://github.com/<owner>/<repo>/releases/latest" }
 
 $latest = [ordered]@{
     version   = $version
@@ -117,7 +122,7 @@ $latest = [ordered]@{
     built_at  = $builtAt
     notes     = $Notes
     prerelease= [bool]$Prerelease
-    download  = "https://github.com/<owner>/<repo>/releases/latest"
+    download  = $dlUrl
 }
 $latestJson = $latest | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $relDir "latest.json"), $latestJson, (New-Object System.Text.UTF8Encoding($false)))
