@@ -4,6 +4,8 @@ import { onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import http, { desktop } from '../api/client'
 import SelfCheckPanel from '../components/SelfCheckPanel.vue'
+import TemplateField from '../components/TemplateField.vue'
+import { ARCHIVE_PRESETS, ARCHIVE_TOKENS, RENAME_PRESETS, RENAME_TOKENS } from '../utils/templates'
 import { fmtTime } from '../utils/format'
 
 const router = useRouter()
@@ -162,12 +164,12 @@ onActivated(load)
             </el-form-item>
           </div>
           <el-form-item label="归档结构模板">
-            <el-input v-model="s.archive_template" />
-            <div class="hint">可用 {category} {year} {month} {day} {company} {contract_no} 等；空段自动跳过。例：{category}/{year}/{month}</div>
+            <TemplateField v-model="s.archive_template" mode="path"
+                           :presets="ARCHIVE_PRESETS" :tokens="ARCHIVE_TOKENS" />
           </el-form-item>
           <el-form-item label="默认重命名模板">
-            <el-input v-model="s.rename_template" />
-            <div class="hint">支持 {date} {underscore} {contract_no} {title} {index} 等字段段</div>
+            <TemplateField v-model="s.rename_template" mode="name"
+                           :presets="RENAME_PRESETS" :tokens="RENAME_TOKENS" />
           </el-form-item>
           <div class="split split-2">
             <el-form-item label="回收站保留天数（0=永不自动清理）">

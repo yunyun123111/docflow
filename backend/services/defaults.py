@@ -55,8 +55,9 @@ def seed_defaults(db: Session) -> None:
     for name, doc_type, mt, pattern, conf in DEFAULT_TYPE_RULES:
         db.add(ClassifyRule(name=name, pattern=pattern, match_type=mt, field="any",
                             document_type=doc_type, confidence=conf))
-    db.add(RenameTemplate(name="通用", document_type="", pattern="{date}{underscore}{contract_no}{underscore}{title}", is_default=True))
-    db.add(RenameTemplate(name="发票", document_type="发票", pattern="发票_{date}{underscore}{amount}元"))
+    db.add(RenameTemplate(name="发票", document_type="发票", pattern="发票_{date}_{amount}元"))
+    # 不再种子“通用”模板：通用默认由设置页的 RENAME_TEMPLATE 提供，
+    # 库里再留一条 document_type 为空的行只会变成“改了不生效”的第二真源。
     db.commit()
 
 

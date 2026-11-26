@@ -25,6 +25,7 @@ os.environ["WATCH_ENABLED"] = "False"
 os.environ["EMAIL_ENABLED"] = "False"
 os.environ["ALLOW_OVERWRITE"] = "False"
 os.environ["ARCHIVE_TEMPLATE"] = "{category}/{year}/{month}"
+os.environ["RENAME_TEMPLATE"] = "{date}_{contract_no}_{title}"
 os.environ["LOG_LEVEL"] = "ERROR"
 os.environ["MIN_FILE_AGE_SECONDS"] = "0"  # 测试即时处理，不等文件稳定窗口
 

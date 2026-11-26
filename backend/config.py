@@ -19,7 +19,7 @@ RES_DIR = Path(str(getattr(sys, '_MEIPASS', str(Path(__file__).resolve().parent.
 # BASE_DIR：可写数据根。打包后落在 %LOCALAPPDATA%\DocFlow，换 exe 不丢数据、不需要管理员权限
 _HOME = RES_DIR if not IS_FROZEN else Path(os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())) / 'DocFlow'
 BASE_DIR = Path(os.environ.get('DOCFLOW_HOME') or str(_HOME))
-VERSION = '2.4.0'
+VERSION = '2.4.1'
 
 
 class Settings(BaseSettings):
@@ -47,8 +47,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # 归档结构与重命名
-    ARCHIVE_TEMPLATE: str = "{category}/{year}/{month}"           # 段缺失自动跳过；支持 {field:公司名称} 等
-    RENAME_TEMPLATE: str = "{date}{underscore}{contract_no}{underscore}{title}"
+    ARCHIVE_TEMPLATE: str = "{category}/{year}/{month}"           # 逐段渲染：空段自动跳过，未知占位符按空处理
+    RENAME_TEMPLATE: str = "{date}_{contract_no}_{title}"         # 分隔符直接写字面量；设置页改了立刻生效
     ALLOW_OVERWRITE: bool = False
     RECYCLE_RETENTION_DAYS: int = 30                              # 0 = 永不自动清理
 

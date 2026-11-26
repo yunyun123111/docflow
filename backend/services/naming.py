@@ -1,8 +1,11 @@
 """命名：重命名模板 + 归档路径模板。
 
 占位符：{date} {company} {counterparty} {contract_no} {amount} {type} {category}
-{year} {month} {day} {title} {orig} {underscore}；{date} 优先取文档字段日期。
-字段缺失导致段为空时自动跳过该段，连续下划线折叠。
+{year} {month} {day} {title} {orig}；{date} 优先取文档字段日期，缺失时用处理当天。
+{year} {month} {day} 取的是归档处理时间，不是文档日期。
+分隔符直接写进模板即可（如 {date}_{title}），{underscore} 为兼容旧配置保留。
+字段缺失导致段为空时自动跳过该段，连续下划线折叠，首尾的 _ . - 裁掉。
+未知占位符按空渲染。
 """
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from backend.config import settings
 from backend.models import RenameTemplate
 from backend.services.fields import FIELD_AMOUNT, FIELD_COMPANY, FIELD_CONTRACT_NO, FIELD_COUNTERPARTY, FIELD_DATE
 from backend.utils.fs import safe_filename
@@ -105,8 +109,14 @@ def render_path(template: str, fields: dict, doc_type: str, category_path: str,
 
 
 def template_for(db: Session, doc_type: str) -> RenameTemplate:
-    t = db.query(RenameTemplate).filter(RenameTemplate.document_type == (doc_type or "")).first()
-    if t:
-        return t
-    t = db.query(RenameTemplate).filter(RenameTemplate.is_default.is_(True)).first()
-    return t or RenameTemplate(name="通用", pattern="{date}{underscore}{title}")
+    """按单据类型取定制模板；通用默认一律跟随设置页的「默认重命名模板」。
+
+    老库里 document_type 为空的“通用”行不再参与取名：两处都能改、却只有一处生效，
+    用户在设置页改完模板发现文件名没变，比模板本身更难排查。
+    """
+    if doc_type:
+        t = db.query(RenameTemplate).filter(RenameTemplate.document_type == doc_type).first()
+        if t:
+            return t
+    return RenameTemplate(name="默认", document_type="", pattern=settings.RENAME_TEMPLATE,
+                          is_default=True)

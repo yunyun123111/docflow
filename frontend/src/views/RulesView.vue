@@ -63,9 +63,17 @@ async function delRule(r: any) { await http.delete(`/rules/${r.id}`); await load
 async function toggleRule(r: any) { await http.put(`/rules/${r.id}`, { ...r }); await loadRules() }
 
 async function addTemplate() {
-  const { value } = await ElMessageBox.prompt('占位符：{date} {contract_no} {amount} {company} {title} {type} {category} {year} {month}', '新增重命名模板', { inputPlaceholder: '如：{type}_{date}_{contract_no}' })
+  const { value } = await ElMessageBox.prompt(
+    '占位符：{date} {contract_no} {amount} {company} {counterparty} {title} {type} {category} {year} {month}；分隔符直接写 _ 或 -',
+    '新增重命名模板', { inputPlaceholder: '如：发票_{date}_{amount}元' })
   if (!value) return
-  await http.post('/rules/templates/rename', { name: value.slice(0, 12), pattern: value, document_type: '', is_default: false })
+  const picked = await ElMessageBox.prompt(
+    '这条模板适用于哪个单据类型？通用默认改名规则请在「系统设置 → 目录与归档」里改，改完立刻生效。',
+    '新增重命名模板', { inputPlaceholder: '如：发票 / 银行回单', inputValue: '', confirmButtonText: '保存' })
+    .then((r) => String(r.value || '').trim()).catch(() => null)
+  if (picked === null) return
+  if (!picked) ElMessage.warning('没有适用类型的模板不会自动生效，只能在审核页手动选中')
+  await http.post('/rules/templates/rename', { name: value.slice(0, 12), pattern: value, document_type: picked, is_default: false })
   await loadTemplates()
 }
 async function delTemplate(t: any) { await http.delete(`/rules/templates/rename/${t.id}`); await loadTemplates() }
@@ -161,6 +169,10 @@ onActivated(refreshAll)
       </el-tab-pane>
 
       <el-tab-pane label="重命名模板" name="templates">
+        <div class="hint" style="margin-bottom: 8px">
+          这里只放「按单据类型定制」的模板（如发票、银行回单）；通用默认的重命名规则在「系统设置 → 目录与归档」里改，
+          那里改完立刻生效。适用类型留空的模板不会被自动选中。
+        </div>
         <el-button size="small" @click="addTemplate">新增模板</el-button>
         <el-table :data="templates" size="small" style="margin-top: 10px">
           <el-table-column prop="name" label="名称" width="140" />
