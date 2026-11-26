@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from backend.models import Category, CategoryKeyword, DocumentSample
 from backend.services import ai as ai_service
 from backend.services.confidence import combine, field_coverage
-from backend.services.fields import FIELD_CONTRACT_NO
+from backend.services.fields import FIELD_COMPANY, FIELD_CONTRACT_NO, FIELD_COUNTERPARTY, _same_company
 from backend.services.fingerprint import fingerprint as make_fp
 from backend.services.rules import RuleHit, evaluate, header_span
 from backend.services.text_norm import normalize_for_match
@@ -84,6 +84,27 @@ def _sample_match(db: Session, text: str):
     return None
 
 
+def _merge_ai_fields(local: dict, ai_fields: dict) -> dict:
+    """并入 AI 字段，但公司/对方两个字段绝不覆盖本地判定。
+
+    模型只会把文中第一家公司塞进「公司名称」，而本地是按 OUR_COMPANY 严格区分我方/对方的；
+    直接覆盖会同时污染 {field:公司名称} 归档名与业务包的我方/对方配对。故：
+    - 本地已判定的公司类字段一律保留；
+    - AI 只能补位：公司名称必须是本公司，对方单位必须不是本公司。
+    """
+    from backend.config import settings
+
+    ours = (settings.OUR_COMPANY or "").strip()
+    merged = {k: v for k, v in ai_fields.items() if k not in (FIELD_COMPANY, FIELD_COUNTERPARTY)}
+    comp = (ai_fields.get(FIELD_COMPANY) or "").strip()
+    if FIELD_COMPANY not in local and comp and ours and _same_company(comp, ours):
+        merged[FIELD_COMPANY] = comp
+    cp = (ai_fields.get(FIELD_COUNTERPARTY) or "").strip()
+    if FIELD_COUNTERPARTY not in local and cp and not (ours and _same_company(cp, ours)):
+        merged[FIELD_COUNTERPARTY] = cp
+    return merged
+
+
 def classify(db: Session, filename: str, text: str, extracted: dict) -> Classification:
     hits = evaluate(db, filename, text)
     rule_hit: RuleHit | None = hits[0] if hits else None
@@ -122,7 +143,8 @@ def classify(db: Session, filename: str, text: str, extracted: dict) -> Classifi
                 c = (db.query(Category).filter(Category.name == cat_name).first()
                      or db.query(Category).filter(Category.path.like(f"%{cat_name}%")).first())
                 ai_cat = c.id if c else None
-            extracted = {**extracted, **{str(k): (str(v), 0.7) for k, v in (data.get("fields") or {}).items() if v}}
+            ai_fields = {str(k): str(v) for k, v in (data.get("fields") or {}).items() if v}
+            extracted = {**extracted, **{k: (v, 0.7) for k, v in _merge_ai_fields(extracted, ai_fields).items()}}
 
     confidence, detail = combine(max(rule_score, sample_score), f_score, kw_score, ai_score)
     if not ai_used and ai_score == 0.0 and confidence < 1.0:

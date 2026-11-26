@@ -41,6 +41,8 @@ const REQ_HINT: Record<string, string> = {
   结算单: '无法核对结算金额',
   提货单: '货权转移没有依据',
   入库单: '采购收货没有依据',
+  银行回单: '钱是否到账没有依据',
+  收付款凭证: '钱是否到账没有依据',
 }
 
 const IGNORE_KEY = 'docflow-bundle-ignored'
@@ -239,6 +241,23 @@ const dirCn = (d: string) =>
   (({ sale: '销售', purchase: '采购', mixed: '购销一体' } as Record<string, string>)[d] || '未定性')
 const completenessText = (b: any) => b.completeness.have + '/' + b.completeness.need
 
+/** 回款视角：钱没收齐的业务包要在列表上直接看得见。 */
+const payWords = (b: any) => (b && b.payment && b.payment.words) || {}
+const shortOf = (b: any) => !!(b && b.payment && Number(b.payment.outstanding) > 0)
+const wan = (v: number) => (Math.abs(v) >= 10000
+  ? (v / 10000).toFixed(1).replace(/\.0$/, '') + '万'
+  : Number(v).toFixed(2))
+function payChip(b: any) {
+  return (payWords(b).short || '未收') + ' ' + wan(Number(b.payment.outstanding))
+}
+function payTip(b: any) {
+  const w = payWords(b)
+  return (w.due || '应收') + ' ' + money(b.payment.due) + ' · ' + (w.paid || '已收') + ' '
+    + money(b.payment.paid) + ' · ' + (w.short || '未收') + ' ' + money(b.payment.outstanding)
+}
+const payDocs = computed(() => (cur.value?.groups || []).flatMap((g: any) => g.pay_docs || []))
+const payTitle = computed(() => (payWords(cur.value).money || '收付') + '情况')
+
 /** 附件角色是否已被必备清单接受（不在清单里的角色不算错）。 */
 function reqOk(g: any, role: string) {
   const r = (g.required || []).find((x: any) => x.role === role)
@@ -314,7 +333,10 @@ onActivated(load)
             <span class="act-avatar" :class="{ plain: b.complete }">{{ completenessText(b) }}</span>
             <span class="act-main">
               <span class="act-title">{{ b.contract_nos?.[0] || b.name }}</span>
-              <span class="act-sub">{{ b.customer || '未识别客户' }} · {{ money(b.amount) }}</span>
+              <span class="act-sub pay-line">
+                <span class="pay-line-t">{{ b.customer || '未识别客户' }} · {{ money(b.amount) }}</span>
+                <span v-if="shortOf(b)" class="pay-chip" :title="payTip(b)">{{ payChip(b) }}</span>
+              </span>
             </span>
             <span v-if="b.diff_count" class="dot bad" :title="'关联 ' + b.diff_count + ' 条未处理差异'">{{ b.diff_count }}</span>
             <span v-else-if="!b.complete" class="dot" :title="'缺 ' + b.completeness.missing.join('、')">!</span>
@@ -358,7 +380,7 @@ onActivated(load)
           </div>
         </el-card>
 
-        <el-card v-for="(g, gi) in cur.groups" :key="gi" class="page-card" :header="g.contract_no || '未编号单据'">
+        <el-card v-for="(g, gi) in cur.groups" :key="gi" class="page-card grp-card" :header="g.contract_no || '未编号单据'">
           <div class="grp-sum hint muted">
             合同金额 {{ money(g.amount) }} · 已结算<span class="muted">（{{ g.settlement_role || '单据' }}）</span>
             {{ money(g.settlement_sum) }}
@@ -367,6 +389,9 @@ onActivated(load)
             </span>
             <span v-if="g.missing.length" class="gap-bad">· 缺 {{ g.missing.join('、') }}</span>
             <span v-else-if="g.required.length" class="gap-ok">· 单据齐备</span>
+            <span v-if="g.due_sum" class="pay-note">· {{ payWords(cur).paid || '已收' }}
+              {{ money(g.pay_sum) }}<span v-if="Number(g.pay_gap) > 0" class="gap-bad">
+                （{{ payWords(cur).short || '未收' }} {{ money(g.pay_gap) }}）</span></span>
           </div>
 
           <div class="doc-grid">
@@ -403,6 +428,46 @@ onActivated(load)
                 <el-button size="small" type="primary" plain @click.stop="uploadFor(r.role)">上传</el-button>
               </div>
             </div>
+          </div>
+        </el-card>
+
+        <el-card v-if="cur.groups.length" class="page-card pay-card" :header="payTitle">
+          <div class="grp-sum hint muted">
+            {{ payWords(cur).due || '应收' }} {{ money(cur.payment?.due) }} ·
+            {{ payWords(cur).paid || '已收' }} {{ money(cur.payment?.paid) }}
+            <span v-if="Number(cur.payment?.outstanding) > 0" class="gap-bad">
+              · {{ payWords(cur).short || '未收' }} {{ money(cur.payment.outstanding) }}</span>
+            <span v-else-if="Number(cur.payment?.outstanding) < 0" class="gap-bad">
+              · 超出{{ payWords(cur).due || '应收' }} {{ money(-Number(cur.payment.outstanding)) }}</span>
+            <span v-else-if="cur.payment?.due" class="gap-ok">· 已收齐</span>
+            <span v-else class="muted">· 结算金额未定，暂不核对{{ payWords(cur).money || '收付' }}</span>
+          </div>
+          <div class="doc-grid">
+            <div v-for="d in payDocs" :key="'pay' + d.item_id" class="doc-tile" @click="showDoc(d)">
+              <DocThumb :doc-id="d.document_id" :file-type="d.file_type" :exists="d.file_exists" :size="104" />
+              <div class="dt-cap">{{ d.filename }}</div>
+              <div class="dt-meta">
+                <el-tag size="small" type="success">{{ d.role }}</el-tag>
+                <span class="mono">{{ money(d.amount) }}</span>
+              </div>
+              <div class="dt-meta"><span class="muted">{{ d.doc_date || '—' }}</span></div>
+              <div class="dt-ops">
+                <el-button size="small" text @click.stop="editRole(d)">改角色</el-button>
+                <el-button size="small" text type="danger" @click.stop="pickDoc(d)">移出</el-button>
+              </div>
+            </div>
+            <div v-if="!payDocs.length" class="doc-tile miss pay-miss" @click="uploadFor('银行回单')">
+              <div class="miss-box">
+                <div class="miss-ico">＋</div>
+                <div class="miss-title">缺{{ payWords(cur).voucher || '收付凭证' }}</div>
+                <div class="miss-sub">{{ REQ_HINT['银行回单'] || '点这里上传回单/凭证' }}</div>
+                <el-button size="small" type="primary" plain @click.stop="uploadFor('银行回单')">上传</el-button>
+              </div>
+            </div>
+          </div>
+          <div class="hint muted pay-hint">
+            对账按「{{ payWords(cur).due || '应收' }} = 已结算金额」比对凭证合计，容差可在设置里调；
+            缺凭证/金额不符会作为差异出现在台账对账页，从那里上传同样会自动归进本包。
           </div>
         </el-card>
 
@@ -465,6 +530,13 @@ onActivated(load)
 .bh-meta i { font-style: normal; color: var(--el-text-color-secondary); margin-right: 6px; }
 
 .grp-sum { margin-bottom: 10px; }
+.activity .act-sub.pay-line { display: flex; align-items: center; gap: 6px; overflow: visible; }
+.activity .pay-line-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pay-chip { flex: 0 0 auto; font-size: 11px; font-weight: 600; padding: 0 7px; line-height: 17px;
+  border-radius: 999px; color: var(--el-color-warning); background: var(--el-color-warning-light-9);
+  border: 1px solid var(--el-color-warning-light-7); }
+.pay-note { margin-left: 4px; }
+.pay-hint { margin-top: 10px; line-height: 1.7; }
 .gap-bad { color: var(--el-color-danger); font-weight: 600; }
 .gap-ok { color: var(--df-green-deep); }
 

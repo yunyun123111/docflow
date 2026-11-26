@@ -19,7 +19,7 @@ RES_DIR = Path(str(getattr(sys, '_MEIPASS', str(Path(__file__).resolve().parent.
 # BASE_DIR：可写数据根。打包后落在 %LOCALAPPDATA%\DocFlow，换 exe 不丢数据、不需要管理员权限
 _HOME = RES_DIR if not IS_FROZEN else Path(os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA') or str(Path.home())) / 'DocFlow'
 BASE_DIR = Path(os.environ.get('DOCFLOW_HOME') or str(_HOME))
-VERSION = '2.3.3'
+VERSION = '2.4.0'
 
 
 class Settings(BaseSettings):
@@ -77,7 +77,8 @@ class Settings(BaseSettings):
     AI_BASE_URL: str = ""
     AI_API_KEY: str = ""
     AI_MODEL: str = ""
-    AI_TIMEOUT: int = 60
+    AI_DISABLE_THINKING: bool = True                 # 各家 flash 默认开思考，慢几十秒且吃钱；关掉后常 <10s（部分中转站会忽略该参数）
+    AI_TIMEOUT: int = 120                                 # 推理模型/中转服务单次常要 30~90s，60s 容易误判超时
     AI_MAX_RETRIES: int = 2
     AI_MAX_TEXT_LENGTH: int = 1500
 
@@ -95,6 +96,8 @@ class Settings(BaseSettings):
     # 对账巡检
     RECON_ENABLED: bool = False
     RECON_INTERVAL_MINUTES: int = 360
+    # 回款/付款容差：银行手续费、尾差、分批到账太常见，拿结算那套 0.5% 去比回款会天天刷屏
+    RECON_PAYMENT_TOLERANCE_PCT: float = 0.01
 
     # 文档归集：采购/销售合并建议的阈值
     # 本公司名称：区分「我方 / 对方」的唯一可靠依据。留空时只能按文中出现顺序猜，

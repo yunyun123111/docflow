@@ -1,0 +1,36 @@
+﻿DocFlow 文流 · 智能文档整理（便携版 v2.4.0）
+================================================
+
+免安装：整个文件夹拷到任意位置（U 盘、桌面、D 盘均可），双击 DocFlow.exe 就能用。
+不需要装 Python，不需要联网，OCR / PDF 解析 / 界面全部在包里。
+
+怎么开始
+1. 双击 DocFlow.exe，会自动打开窗口（首次启动要解压运行时，等十几秒属正常）。
+2. 进"设置"指定待整理目录和归档目录，然后开始整理。
+3. 机器拿不准的文件会进入"待审核"由你确认；不配 AI 也能用（纯规则 + OCR）。
+
+数据在哪里
+%LOCALAPPDATA%\DocFlow（数据库、归档、回收站、备份、日志都在这，与 exe 放在哪无关）。
+升级 = 关掉程序，用新包解压覆盖旧文件夹，数据不丢。
+卸载 = 删掉本文件夹；想连数据一起清，再删上面那个目录。
+
+命令行参数
+DocFlow.exe                打开窗口使用
+DocFlow.exe --no-window    起服务并用系统浏览器打开
+DocFlow.exe --serve        只跑服务（适合后台 / 开机自启）
+DocFlow.exe --lan          局域网共享给同事，首次自动生成访问密码并打印
+DocFlow.exe --port 8123    换端口（默认 8000，注意别和旧版同时占 8000）
+
+环境变量（进阶，先 set 再启动）
+DOCFLOW_HOME=D:\DocFlowData   换数据目录
+DOCFLOW_PORT / DOCFLOW_HOST   指定端口 / 监听地址
+DOCFLOW_SHELL=browser         强制用浏览器界面，不用原生窗口
+DOCFLOW_DEBUG=1               打开开发者工具
+DOCFLOW_WEBVIEW_FLAGS=--disable-gpu   远程桌面或无显卡虚拟机上窗口画不出来时用
+
+窗口卡住 / 一直"无响应"
+程序会在 20 秒内自行改用浏览器界面，并记住这个选择，下次双击直接进浏览器。
+想再试原生窗口：删掉数据目录下的 .window-state；或先更新「Microsoft Edge WebView2 运行时」。
+
+出问题看哪里
+%LOCALAPPDATA%\DocFlow\logs\desktop.log（窗口、端口、回退过程都记在这里）。

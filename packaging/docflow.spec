@@ -16,7 +16,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 ROOT = os.path.abspath(os.path.dirname(SPECPATH))  # SPECPATH = packaging/
 APP_NAME = "DocFlow"
-VERSION = "2.3.3"
+VERSION = "2.4.0"
 
 hiddenimports = [m for m in collect_submodules("backend") if "tests" not in m]
 hiddenimports += [

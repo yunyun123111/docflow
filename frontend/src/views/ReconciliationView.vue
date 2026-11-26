@@ -22,15 +22,22 @@ const busy = ref(false)
 const ledgerUpload = ref<HTMLInputElement>()
 
 const TYPE_LABEL: any = {
-  missing_doc: '缺结算/发票', missing_required: '缺必备单据', missing_payment: '未回款',
+  missing_doc: '缺结算/发票', missing_required: '缺必备单据',
+  missing_payment: '未回款/缺凭证', payment_shortfall: '收付金额不符',
+  payment_mismatch: '凭证与台账不符',
   amount_mismatch: '金额不符', extra_doc: '文档无台账', date_suspect: '日期可疑',
   seal_missing: '疑似缺章',
 }
+const PAY_TYPES = ['missing_payment', 'payment_shortfall', 'payment_mismatch']
 const SEV_TYPE: any = { error: 'danger', warn: 'warning', info: 'info' }
 
 /** 差异标签：缺必备单据要说清楚缺的是哪一类，不能只写“缺必备单据”。 */
 function diffLabel(d: any) {
   if (d.type === 'missing_required') return '缺' + ((d.detail && d.detail.required_role) || '必备单据')
+  if (d.type === 'missing_payment') {
+    const det = d.detail || {}
+    return det.reason === 'ledger_paid' ? '台账已回款·缺凭证' : '未回款/缺凭证'
+  }
   return TYPE_LABEL[d.type] || d.type
 }
 
@@ -310,6 +317,19 @@ onActivated(loadAll)
               {{ ev.bundle.completeness.have }}/{{ ev.bundle.completeness.need }}
             </el-tag>
           </div>
+          <template v-if="ev.payment">
+            <div class="ev-row"><i>{{ ev.payment.due_word }}</i>{{ money(ev.payment.due) }}</div>
+            <div class="ev-row"><i>{{ ev.payment.paid_word }}</i>{{ money(ev.payment.effective) }}
+              <span v-if="ev.payment.paid_ledger" class="muted">
+                （台账 {{ money(ev.payment.paid_ledger) }}·凭证 {{ money(ev.payment.paid) }}）</span>
+            </div>
+            <div class="ev-row"><i>{{ ev.payment.short_word }}</i>
+              <span :class="Number(ev.payment.outstanding) > 0 ? 'gap-bad' : 'gap-ok'">
+                {{ money(ev.payment.outstanding) }}</span>
+              <span v-if="Number(ev.payment.uncleared) > 0" class="muted">
+                （凭证还差 {{ money(ev.payment.uncleared) }}）</span>
+            </div>
+          </template>
         </div>
         <div v-else class="hint muted">这条差异还没有对应的业务包（档案库里找不到该合同的任何单据），先把合同归档即可自动归集。</div>
 
@@ -339,10 +359,12 @@ onActivated(loadAll)
         <div v-if="ev.missing.length" class="ev-miss">
           <div v-for="m in ev.missing" :key="m.role" class="ev-miss-row">
             <div class="grow">
-              <div class="ev-miss-role">缺{{ m.role }}</div>
+              <div class="ev-miss-role">缺{{ m.label || m.role }}</div>
               <div class="hint muted">
                 已归档 {{ m.present }}/{{ m.min_count }} 份
-                <span v-if="m.amount_check"> · 需与合同金额一致</span>
+                <span v-if="m.expected"> · {{ (ev.payment && ev.payment.due_word) || '应到' }}
+                  {{ money(m.expected) }}，已 {{ money(m.actual) }}</span>
+                <span v-else-if="m.amount_check"> · 需与合同金额一致</span>
               </div>
             </div>
             <el-button size="small" type="primary" plain :disabled="evLoading"

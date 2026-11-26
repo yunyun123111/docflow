@@ -30,6 +30,7 @@ def _out() -> dict:
         "ocr_enabled": settings.OCR_ENABLED,
         "ai": {"enabled": settings.AI_ENABLED, "base_url": settings.AI_BASE_URL,
                "model": settings.AI_MODEL, "timeout": settings.AI_TIMEOUT,
+               "disable_thinking": settings.AI_DISABLE_THINKING,
                "api_key_set": bool(settings.AI_API_KEY)},
         "watch": {"enabled": settings.WATCH_ENABLED, "dirs": [str(d) for d in settings.watch_dirs],
                   "interval": settings.WATCH_INTERVAL},
@@ -42,6 +43,7 @@ def _out() -> dict:
                   "subject_prefix": settings.EMAIL_SUBJECT_PREFIX},
         "recon": {"enabled": settings.RECON_ENABLED, "interval_minutes": settings.RECON_INTERVAL_MINUTES},
         "our_company": settings.OUR_COMPANY,
+        "recon_payment_tolerance_pct": settings.RECON_PAYMENT_TOLERANCE_PCT,
         "bundle": {"merge_suggest_enabled": settings.BUNDLE_MERGE_SUGGEST_ENABLED,
                    "amount_tolerance": settings.BUNDLE_MERGE_AMOUNT_TOLERANCE,
                    "date_window_days": settings.BUNDLE_MERGE_DATE_WINDOW_DAYS},
@@ -68,7 +70,7 @@ def update(req: SettingsIn):
         "max_workers": "MAX_WORKERS", "host": "HOST", "access_password": "ACCESS_PASSWORD",
         "ocr_enabled": "OCR_ENABLED", "ocr_max_pages": "OCR_MAX_PAGES",
         "ai_enabled": "AI_ENABLED", "ai_base_url": "AI_BASE_URL", "ai_api_key": "AI_API_KEY",
-        "ai_model": "AI_MODEL", "ai_timeout": "AI_TIMEOUT",
+        "ai_model": "AI_MODEL", "ai_timeout": "AI_TIMEOUT", "ai_disable_thinking": "AI_DISABLE_THINKING",
         "watch_enabled": "WATCH_ENABLED", "watch_interval": "WATCH_INTERVAL",
         "seal_detect_enabled": "SEAL_DETECT_ENABLED",
         "email_enabled": "EMAIL_ENABLED", "email_imap_host": "EMAIL_IMAP_HOST",
@@ -79,6 +81,7 @@ def update(req: SettingsIn):
         "email_subject_prefix": "EMAIL_SUBJECT_PREFIX",
         "recon_enabled": "RECON_ENABLED", "recon_interval_minutes": "RECON_INTERVAL_MINUTES",
         "our_company": "OUR_COMPANY",
+        "recon_payment_tolerance_pct": "RECON_PAYMENT_TOLERANCE_PCT",
         "bundle_merge_suggest_enabled": "BUNDLE_MERGE_SUGGEST_ENABLED",
         "bundle_merge_amount_tolerance": "BUNDLE_MERGE_AMOUNT_TOLERANCE",
         "bundle_merge_date_window_days": "BUNDLE_MERGE_DATE_WINDOW_DAYS",
@@ -108,15 +111,16 @@ def update(req: SettingsIn):
 
 @router.post("/test/ai")
 def test_ai():
-    from backend.services.ai import ai_enabled, _chat
+    from backend.services.ai import ai_enabled, ping
 
     if not ai_enabled():
         return {"ok": False, "detail": "AI 未启用或未配置"}
     try:
-        reply = _chat("回复 OK 两个字母即可")
-        return {"ok": True, "echo": reply[:40]}
+        echo, cost = ping()
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "detail": str(e)[:200]}
+    hint = "（已接近超时上限，建议调大超时）" if cost > settings.AI_TIMEOUT * 0.8 else ""
+    return {"ok": True, "echo": echo or "(空回复)", "seconds": cost, "detail": f"耗时 {cost}s{hint}"}
 
 
 @router.post("/test/email")

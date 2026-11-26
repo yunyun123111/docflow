@@ -94,6 +94,9 @@ if ($SkipPackage) {
 $dist = Join-Path $root "dist\DocFlow"
 if (-not (Test-Path (Join-Path $dist "DocFlow.exe"))) { throw "产物缺失：$dist\DocFlow.exe" }
 
+# 分享包附带使用说明：接收方双击 exe 即可上手
+$noteSrc = Join-Path $PSScriptRoot "使用说明.txt"
+if (Test-Path $noteSrc) { Copy-Item $noteSrc (Join-Path $dist "使用说明.txt") -Force }
 # ---------- 4. 压 zip + 生成 latest.json ----------
 Step "[4/5] 压缩桌面版 -> release\DocFlow-Desktop-$tag.zip"
 if (-not (Test-Path $relDir)) { New-Item -ItemType Directory -Force -Path $relDir | Out-Null }

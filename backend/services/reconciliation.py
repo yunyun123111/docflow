@@ -43,11 +43,16 @@ HEADER_ALIASES = {
     "contract_no": ["合同编号", "合同号", "框架合同号", "协议编号", "编号", "合同名称编号"],
     "customer": ["客户名称", "客户", "对方单位", "买方", "需方", "购买方", "委托方"],
     "our_entity": ["我方", "我方主体", "供方", "卖方", "销售方", "主体"],
-    "amount": ["合同金额", "金额", "总价", "合同总价", "价款", "签约金额"],
-    "sign_date": ["签订日期", "签约日期", "签署日期", "日期", "合同日期"],
+    "amount": ["合同金额", "签约金额", "合同总价", "总价", "价款", "金额",
+               # 回款/结算表常用的列名：从前只有两字的「金额」能命中，付款金额/到账日期一律读空
+               "付款金额", "收款金额", "回款金额", "到账金额", "实收金额", "已收金额", "已付金额",
+               "结算金额", "发票金额"],
+    "sign_date": ["签订日期", "签约日期", "签署日期", "合同日期", "日期",
+                  "付款日期", "到账日期", "回款日期", "收款日期", "结算日期"],
     "direction": ["业务类别", "方向", "购销类型", "类型"],
     "settlement_total": ["结算金额", "已结算金额", "结算合计"],
-    "received_total": ["回款金额", "已回款金额", "累计回款", "收款金额"],
+    "received_total": ["回款金额", "已回款金额", "累计回款", "收款金额",
+                       "付款金额", "已付款金额", "累计付款", "到账金额", "实收金额", "已收金额"],
     "contract_name": ["合同名称", "项目名称", "标的"],
 }
 
@@ -107,6 +112,47 @@ def amount_close(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return False
     return abs(a - b) <= max(AMOUNT_TOL_ABS, AMOUNT_TOL_REL * max(abs(a), abs(b)))
+
+
+def pay_close(a: float | None, b: float | None) -> bool:
+    """回款/付款专用容差（默认 1%）：银行手续费、尾差、分批到账是常态，
+    拿结算那套 0.5% 去比回款会天天刷屏；绝对下限仍沿用 1 元。"""
+    from backend.config import settings
+
+    if a is None or b is None:
+        return False
+    rel = settings.RECON_PAYMENT_TOLERANCE_PCT or 0.0
+    return abs(a - b) <= max(AMOUNT_TOL_ABS, rel * max(abs(a), abs(b)))
+
+
+# 凭证名 / 该收付 / 已收付 / 未收付 / 钱名：方向只改文案，不改类型名与判定口径
+PAY_WORDS: dict[str, tuple[str, str, str, str, str]] = {
+    "sale": ("回款凭证", "应收", "已收", "未收", "回款"),
+    "purchase": ("付款凭证", "应付", "已付", "未付", "付款"),
+    "mixed": ("收付凭证", "该收付", "已收付", "未收付", "收付"),
+}
+
+
+def _pay_words(direction: str) -> tuple[str, str, str, str, str]:
+    return PAY_WORDS.get((direction or "").strip().lower(), PAY_WORDS["mixed"])
+
+
+def _norm_direction(v) -> str:
+    """台账里的业务类别是中文（销售/采购），包上的方向是英文，统一成一个口径。"""
+    s = norm_text(v)
+    if not s:
+        return ""
+    if s in ("sale", "sell", "销售"):
+        return "sale"
+    if s in ("purchase", "buy", "采购", "购买"):
+        return "purchase"
+    if ("销" in s and ("采" in s or "购" in s)) or s in ("mixed", "购销", "既销既购"):
+        return "mixed"
+    if "销" in s:
+        return "sale"
+    if "采" in s or "购" in s:
+        return "purchase"
+    return ""
 
 
 # ---------------- LedgerReader ----------------
@@ -340,11 +386,14 @@ class CheckRow:
     settlement_total: float | None = None
     received_total: float | None = None
     our_entity: str = ""
+    due_total: float | None = None      # 该收/该付：已结算额优先，退回合同金额
+    direction: str = ""                 # sale | purchase | mixed | ""
 
 
 SEVERE_REQUIRED = ("发票", "结算单")
+PAYMENT_DIFF_TYPES = ("missing_payment", "payment_mismatch", "payment_shortfall")
 RECHECKABLE = ("missing_doc", "missing_required", "amount_mismatch", "missing_payment",
-               "date_suspect", "seal_missing")
+               "date_suspect", "seal_missing", "payment_mismatch", "payment_shortfall")
 
 
 def _emit(db: Session, run: ReconRun, counts: dict, carried: dict, diff: ReconDiff) -> None:
@@ -423,6 +472,75 @@ def worst_amount_bucket(m: Matches, expected: float | None) -> tuple[str, float,
     return worst
 
 
+def _payment_state(*, due: float | None, paid_ledger: float | None,
+                   pay_docs: list["DocRecord"], direction: str, ledger_mode: bool) -> dict:
+    """回款核对的唯一算式：该收付 → 已收付 → 差额，state ∈ ok|no_payment|ledger_paid|mismatch|shortfall。
+
+    缺凭证族与金额族互斥：一张凭证都没有时只谈「缺凭证」，有凭证才谈「账证不符 / 收付不足」，
+    同一件事绝不报两条；账证都不一致时先修账证，差额留到一致了再说。
+    """
+    voucher, due_word, paid_word, short_word, money_word = _pay_words(direction)
+    paid_docs = sum(d.amount or 0 for d in pay_docs)
+    out = {"state": "ok", "voucher": voucher, "expected": "", "actual": "",
+           "gap": None, "docs": [d.id for d in pay_docs], "severity": "warn"}
+    if not due or due <= 0:
+        return out                      # 没有「该收付」的依据（只有合同、没有结算），不报回款差异
+    effective = max(paid_docs, paid_ledger or 0.0)
+
+    if not pay_docs:
+        if paid_ledger:
+            out["state"] = "ledger_paid"
+            out["expected"] = f"台账已记{money_word} {paid_ledger:.2f}"
+            out["actual"] = "档案库无凭证"
+        else:
+            out["state"] = "no_payment"
+            out["expected"] = f"{due:.2f}"
+            out["actual"] = f"未{money_word}且无凭证"
+        return out
+
+    if ledger_mode and paid_ledger and not pay_close(paid_docs, paid_ledger):
+        out["state"] = "mismatch"
+        out["expected"] = f"台账{paid_word} {paid_ledger:.2f}"
+        out["actual"] = f"凭证合计 {paid_docs:.2f}"
+        out["gap"] = round(paid_docs - paid_ledger, 2)
+        return out
+
+    if not pay_close(effective, due):
+        gap = round(effective - due, 2)
+        tail = f"{short_word} {-gap:.2f}" if gap < 0 else f"超出{due_word} {gap:.2f}"
+        out["state"] = "shortfall"
+        out["expected"] = f"{due_word} {due:.2f}"
+        out["actual"] = f"{paid_word} {effective:.2f}（{tail}）"
+        out["gap"] = gap
+    return out
+
+
+def _payment_checks(db: Session, run: ReconRun, counts: dict, carried: dict, *, row: CheckRow,
+                    m: Matches, bundle_id: int | None, direction: str) -> None:
+    """与 _required_diffs 平级：台账模式比账面已收付，自对账模式比包内凭证合计。"""
+    due = row.due_total if row.due_total and row.due_total > 0 else None
+    if due is None:
+        return
+    if not (m.anchors or m.settle or m.pay):
+        # 档案库里连一份单据都没有：只报 missing_doc，不能凭空追一笔「该收没收到」
+        return
+    paid_ledger = row.received_total if row.received_total and row.received_total > 0 else None
+    ledger_mode = run.source == "ledger"
+    st = _payment_state(due=due, paid_ledger=paid_ledger, pay_docs=m.pay,
+                        direction=direction, ledger_mode=ledger_mode)
+    if st["state"] == "ok":
+        return
+    dtype = ("missing_payment" if st["state"] in ("no_payment", "ledger_paid")
+             else "payment_mismatch" if st["state"] == "mismatch" else "payment_shortfall")
+    _emit(db, run, counts, carried, ReconDiff(
+        run_id=run.id, key=diff_key(row.contract_no, dtype, None), diff_type=dtype,
+        severity=st["severity"], contract_no=row.contract_no, customer=row.customer,
+        expected=st["expected"][:200], actual=st["actual"][:200],
+        detail={"bundle_id": bundle_id, "docs": st["docs"], "due": due,
+                "paid_ledger": paid_ledger, "direction": direction, "gap": st["gap"],
+                "mode": "ledger" if ledger_mode else "archive", "reason": st["state"]}))
+
+
 def _required_diffs(db: Session, run: ReconRun, counts: dict, carried: dict, *, row: CheckRow,
                     m: Matches, reqs: dict, bundle_id: int | None) -> None:
     """必备单据清单 → 逐角色缺件差异（role 写进 detail，前端据此出上传入口）。"""
@@ -453,6 +571,7 @@ def _check_row(db: Session, run: ReconRun, counts: dict, carried: dict, row: Che
     """一份业务的全部检查项；台账模式与自对账模式共用，保证口径一致。"""
     b = bundle_for_contract(db, row.contract_no)
     bundle_id = b.id if b else None
+    direction = _norm_direction(row.direction) or (b.direction if b else "")
 
     if m.anchors:
         # 有合同锚点：按清单报缺件，不再重复报粗粒度 missing_doc
@@ -475,12 +594,6 @@ def _check_row(db: Session, run: ReconRun, counts: dict, carried: dict, row: Che
                 customer=row.customer, expected=f"{row.amount:.2f}", actual=f"{total:.2f}",
                 detail={"docs": [d.id for d in ds], "files": [d.filename for d in ds],
                         "doc_type": dtype, "bundle_id": bundle_id}))
-        if not m.pay and row.received_total in (None, 0) and row.settlement_total in (None, 0):
-            _emit(db, run, counts, carried, ReconDiff(
-                run_id=run.id, key=diff_key(row.contract_no, "missing_payment", None),
-                diff_type="missing_payment", severity="info", contract_no=row.contract_no,
-                customer=row.customer, expected="回款凭证/银行回单", actual="未回款或未找到回款记录",
-                detail={"bundle_id": bundle_id, "docs": []}))
 
     for d in m.settle:
         if d.doc_date and row.sign_date and d.doc_date < row.sign_date:
@@ -500,17 +613,18 @@ def _check_row(db: Session, run: ReconRun, counts: dict, carried: dict, row: Che
                 customer=row.customer, document_id=d.id, expected="盖章件",
                 actual="未检测到红章", detail={"file": d.filename, "bundle_id": bundle_id}))
 
+    _payment_checks(db, run, counts, carried, row=row, m=m, bundle_id=bundle_id,
+                    direction=direction)
 
-def _resolve_source(db: Session, source: str) -> str:
-    src = (source or "auto").strip().lower()
-    has_ledger = db.query(Ledger).count() > 0
-    if src == "ledger":
-        if not has_ledger:
-            raise ValueError("选择台账对账但还没有台账，请先上传业务台账 Excel")
-        return "ledger"
-    if src == "archive":
-        return "archive"
-    return "ledger" if has_ledger else "archive"
+
+def _checkrow_from_ledger(r: LedgerRow) -> CheckRow:
+    """台账行 → 待核对业务；`due_total` = 已结算额优先，退回合同金额。"""
+    return CheckRow(contract_no=r.contract_no, customer=r.customer, amount=r.amount,
+                    sign_date=r.sign_date, settlement_total=r.settlement_total,
+                    received_total=r.received_total, our_entity=r.our_entity,
+                    due_total=r.settlement_total if r.settlement_total and r.settlement_total > 0
+                    else r.amount,
+                    direction=_norm_direction(r.direction))
 
 
 def _archive_rows(db: Session) -> list[CheckRow]:
@@ -527,10 +641,25 @@ def _archive_rows(db: Session) -> list[CheckRow]:
             if key in seen:
                 continue
             seen.add(key)
+            # 该收付 = 包内结算/发票分桶合计（结算了就该收到钱），没有结算类单据退回合同金额
             rows.append(CheckRow(contract_no=g["contract_no"], customer=rep["customer"],
                                  amount=g["amount"], sign_date=g["sign_date"],
-                                 our_entity=rep["our_entity"]))
+                                 our_entity=rep["our_entity"],
+                                 due_total=g["settlement_sum"] or g["amount"],
+                                 direction=rep["direction"]))
     return rows
+
+
+def _resolve_source(db: Session, source: str) -> str:
+    src = (source or "auto").strip().lower()
+    has_ledger = db.query(Ledger).count() > 0
+    if src == "ledger":
+        if not has_ledger:
+            raise ValueError("选择台账对账但还没有台账，请先上传业务台账 Excel")
+        return "ledger"
+    if src == "archive":
+        return "archive"
+    return "ledger" if has_ledger else "archive"
 
 
 def run_reconciliation(db: Session, ledger_id: int | None = None,
@@ -547,7 +676,7 @@ def run_reconciliation(db: Session, ledger_id: int | None = None,
         ledgers = q.all()
         if not ledgers:
             raise ValueError("还没有台账，请先上传业务台账 Excel")
-        rows = [r for l in ledgers for r in l.rows]
+        rows = [_checkrow_from_ledger(r) for l in ledgers for r in l.rows]
     else:
         rows = _archive_rows(db)
 
@@ -690,12 +819,24 @@ def recheck_diff(db: Session, diff: ReconDiff) -> dict:
                 remaining = []
         else:
             remaining = ["金额"]
-    elif diff.diff_type == "missing_payment":
-        label = "回款凭证"
-        if m.pay:
-            closed_by = [d.id for d in m.pay]
+    elif diff.diff_type in PAYMENT_DIFF_TYPES:
+        # 用与首轮同一套算式复算：凭证出现 → 账证一致 → 差额进入容差，逐层放行
+        st = _payment_state(due=detail.get("due"), paid_ledger=detail.get("paid_ledger"),
+                            pay_docs=m.pay, direction=detail.get("direction") or "",
+                            ledger_mode=detail.get("mode") == "ledger")
+        label = st["voucher"]
+        if st["state"] == "ok":
+            before = {int(x) for x in (detail.get("docs") or [])}
+            closed_by = [d.id for d in m.pay if d.id not in before] or [d.id for d in m.pay]
+            if not closed_by:
+                closed_by = sorted(before)
         else:
-            remaining = ["回款凭证"]
+            remaining = [st["voucher"]]
+            detail["reason"] = st["state"]
+            detail["gap"] = st["gap"]
+            detail["docs"] = st["docs"]
+            diff.expected = st["expected"][:200]
+            diff.actual = st["actual"][:200]
     elif diff.diff_type == "date_suspect":
         rec = next((d for d in docs if d.id == diff.document_id), None)
         sign = detail.get("sign_date") or ""
@@ -763,6 +904,28 @@ def diff_evidence(db: Session, diff: ReconDiff) -> dict:
                     "ok": False, "amount_check": detail.get("amount_check", True),
                     "expected": None, "actual": None, "amount_ok": None}]
 
+    payment = None
+    if diff.diff_type in PAYMENT_DIFF_TYPES:
+        voucher, due_word, paid_word, short_word, _money = _pay_words(detail.get("direction") or "")
+        due = detail.get("due")
+        pay_rows = [d for d in (group["attachments"] if group else []) if d["role"] in PAY_DOC_TYPES]
+        paid = sum(d.get("amount") or 0 for d in pay_rows)
+        if not group and detail.get("docs"):
+            ids = {int(x) for x in detail["docs"] if str(x).lstrip("-").isdigit()}
+            paid = sum(d.amount or 0 for d in build_doc_index(db) if d.id in ids)
+        paid_ledger = detail.get("paid_ledger")
+        effective = max(paid, paid_ledger or 0.0)
+        payment = {"due": due, "paid": paid, "paid_ledger": paid_ledger, "effective": effective,
+                   "outstanding": round(due - effective, 2) if due else None,
+                   "uncleared": round(due - paid, 2) if due else None,
+                   "voucher": voucher, "due_word": due_word, "paid_word": paid_word,
+                   "short_word": short_word, "reason": detail.get("reason") or ""}
+        if not any(q.get("role") in PAY_DOC_TYPES for q in missing):
+            missing = list(missing) + [{
+                "role": "银行回单", "present": len(pay_rows), "min_count": 1, "ok": False,
+                "amount_check": True, "expected": due, "actual": paid, "amount_ok": False,
+                "label": voucher}]
+
     return {
         "diff": {"id": diff.id, "type": diff.diff_type,
                  "label": DIFF_TYPE_LABEL.get(diff.diff_type, diff.diff_type),
@@ -775,6 +938,7 @@ def diff_evidence(db: Session, diff: ReconDiff) -> dict:
         "bundle": ({k: v for k, v in rep.items() if k != "groups"} if rep else None),
         "bundle_id": bundle.id if bundle else None,
         "group": group,
+        "payment": payment,
         "docs": matched,
         "missing": missing,
         "still_missing": detail.get("still_missing") or [],
@@ -784,7 +948,9 @@ def diff_evidence(db: Session, diff: ReconDiff) -> dict:
 DIFF_TYPE_LABEL = {
     "missing_doc": "缺结算/发票单据",
     "missing_required": "缺必备单据",
-    "missing_payment": "未回款/缺回款凭证",
+    "missing_payment": "未回款/缺凭证",
+    "payment_shortfall": "收付金额不符",
+    "payment_mismatch": "凭证与台账不符",
     "amount_mismatch": "金额不符",
     "extra_doc": "文档无对应台账",
     "date_suspect": "日期可疑",

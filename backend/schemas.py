@@ -123,6 +123,7 @@ class SettingsIn(BaseModel):
     ai_api_key: str | None = None
     ai_model: str | None = None
     ai_timeout: int | None = None
+    ai_disable_thinking: bool | None = None
     access_password: str | None = None
     host: str | None = None
     watch_enabled: bool | None = None
@@ -130,6 +131,7 @@ class SettingsIn(BaseModel):
     watch_interval: int | None = None
     seal_detect_enabled: bool | None = None
     our_company: str | None = None
+    recon_payment_tolerance_pct: float | None = None
     email_enabled: bool | None = None
     email_imap_host: str | None = None
     email_imap_port: int | None = None

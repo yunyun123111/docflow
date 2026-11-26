@@ -404,7 +404,8 @@ def bundle_report(db: Session, bundle: Bundle, reqs: dict[str, list[DocRequireme
     """一个包的齐备度视图；分组键 = 合同锚点的归一化合同号。"""
     amount_close, contract_variants, norm_no, _, to_date, to_decimal = _helpers()
     from backend.services.fields import FIELD_AMOUNT, FIELD_CONTRACT_NO, FIELD_DATE
-    from backend.services.reconciliation import SETTLE_DOC_TYPES
+    from backend.services.reconciliation import (PAY_DOC_TYPES, SETTLE_DOC_TYPES, pay_close,
+                                                 _pay_words)
 
     reqs = reqs if reqs is not None else requirements_map(db)
     items = sorted(items_of(db, bundle.id), key=lambda i: (0 if is_contract_role(i.role) else 1, i.id))
@@ -484,19 +485,54 @@ def bundle_report(db: Session, bundle: Bundle, reqs: dict[str, list[DocRequireme
         groups[gkey]["settlement_sum"] = settle_sum or None
         groups[gkey]["settlement_role"] = settle_role
         groups[gkey]["amount_gap"] = amount_gap
+        # 回款/付款视角：凭证只按角色取，缺凭证不进必备单据清单（那是 missing_payment 的活）
+        pay_rows = [a for a in g["attachments"] if a["role"] in PAY_DOC_TYPES]
+        pay_sum = round(sum(a["amount"] or 0 for a in pay_rows), 2)
+        due_sum = settle_sum or anchor_amount
+        if not pay_rows:
+            pay_state = "none"
+        elif due_sum is None or pay_close(pay_sum, due_sum):
+            pay_state = "full"
+        else:
+            pay_state = "over" if pay_sum > due_sum else "partial"
+        groups[gkey]["pay_docs"] = pay_rows
+        groups[gkey]["pay_sum"] = pay_sum or None
+        groups[gkey]["due_sum"] = due_sum
+        groups[gkey]["pay_gap"] = round(due_sum - pay_sum, 2) if due_sum is not None else None
+        groups[gkey]["pay_state"] = pay_state
         out_groups.append({"contract_no": g["contract_no"], "anchor_roles": sorted(anchor_roles),
                            "anchors": g["anchors"], "attachments": g["attachments"],
                            "required": required, "missing": groups[gkey]["missing"],
                            "amount": anchor_amount, "sign_date": sign_date,
                            "settlement_sum": groups[gkey]["settlement_sum"],
                            "settlement_role": groups[gkey].get("settlement_role", ""),
-                           "amount_gap": groups[gkey]["amount_gap"]})
+                           "amount_gap": groups[gkey]["amount_gap"],
+                           "pay_docs": pay_rows, "pay_sum": groups[gkey]["pay_sum"],
+                           "due_sum": due_sum, "pay_gap": groups[gkey]["pay_gap"],
+                           "pay_state": pay_state})
 
     contract_nos = [g["contract_no"] for g in out_groups if g["contract_no"]]
     variants: set[str] = set()
     for c in contract_nos:
         variants |= contract_variants(c)
     diff_count = sum(v for k, v in (diff_counts or {}).items() if k in variants)
+
+    due_total = round(sum(g["due_sum"] or 0 for g in out_groups), 2)
+    paid_total = round(sum(g["pay_sum"] or 0 for g in out_groups), 2)
+    voucher, due_word, paid_word, short_word, money_word = _pay_words(bundle.direction)
+    if paid_total <= 0:
+        pay_state = "none"
+    elif not due_total:
+        pay_state = "full"
+    elif pay_close(paid_total, due_total):
+        pay_state = "full"
+    else:
+        pay_state = "over" if paid_total > due_total else "partial"
+    payment = {"due": due_total or None, "paid": paid_total or None,
+               "outstanding": round(due_total - paid_total, 2) if due_total else None,
+               "state": pay_state,
+               "words": {"voucher": voucher, "due": due_word, "paid": paid_word,
+                         "short": short_word, "money": money_word}}
 
     return {
         "id": bundle.id, "name": bundle.name, "contract_key": bundle.contract_key,
@@ -505,7 +541,7 @@ def bundle_report(db: Session, bundle: Bundle, reqs: dict[str, list[DocRequireme
         "amount": bundle.amount, "sign_date": bundle.sign_date, "status": bundle.status,
         "note": bundle.note, "source": bundle.source,
         "updated_at": bundle.updated_at.isoformat(timespec="seconds") if bundle.updated_at else None,
-        "groups": out_groups, "item_count": len(items),
+        "groups": out_groups, "item_count": len(items), "payment": payment,
         "completeness": {"have": have_total, "need": need_total, "missing": missing_all},
         "complete": need_total > 0 and have_total == need_total,
         "diff_count": diff_count,

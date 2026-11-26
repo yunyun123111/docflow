@@ -36,8 +36,10 @@ WINDOW_TITLE = "DocFlow 文流 · 智能文档整理"
 
 # ---------------- 基础工具 ----------------
 def _redirect_streams() -> None:
-    """窗口版没有控制台，stdout/stderr 为 None，uvicorn 会炸；接回日志文件。"""
-    if sys.stdout is not None and sys.stderr is not None:
+    """窗口版冻结包没有可用控制台：stdout/stderr 要么是 None，要么指向一个随时
+    会失效的句柄（PyMuPDF 光打一条弃用警告就能让整份 PDF 解析失败，报 [Errno 22]）。
+    所以只要被打包成 exe 就一律接回日志文件，顺便让库日志不再丢。"""
+    if not IS_FROZEN:
         return
     try:
         from backend.config import BASE_DIR
@@ -45,10 +47,7 @@ def _redirect_streams() -> None:
         log_dir = BASE_DIR / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         fh = open(log_dir / "server.log", "a", encoding="utf-8", buffering=1)
-        if sys.stdout is None:
-            sys.stdout = fh
-        if sys.stderr is None:
-            sys.stderr = fh
+        sys.stdout = sys.stderr = fh
     except Exception:
         class _Null:
             def write(self, *a, **k): return 0

@@ -23,6 +23,7 @@ async function load() {
   s.value = await http.get('/settings')
   // 后端存的是小数容差，界面上按百分比更好读，也更好改
   s.value.bundle.amount_tolerance_pct = Math.round(Number(s.value.bundle.amount_tolerance || 0) * 1000) / 10
+  s.value.recon_payment_pct = Math.round(Number(s.value.recon_payment_tolerance_pct || 0) * 1000) / 10
   watchDirsText.value = (s.value.watch.dirs || []).join('\n')
   backups.value = await http.get('/backup/list')
   components.value = await http.get('/system/components')
@@ -44,7 +45,7 @@ async function save() {
       max_workers: s.value.max_workers, max_upload_mb: s.value.max_upload_mb,
       ocr_enabled: s.value.ocr_enabled, ocr_max_pages: s.value.ocr_max_pages,
       ai_enabled: s.value.ai.enabled, ai_base_url: s.value.ai.base_url,
-      ai_model: s.value.ai.model, ai_timeout: s.value.ai.timeout,
+      ai_model: s.value.ai.model, ai_timeout: s.value.ai.timeout, ai_disable_thinking: s.value.ai.disable_thinking,
       watch_enabled: s.value.watch.enabled, watch_interval: s.value.watch.interval,
       seal_detect_enabled: s.value.seal_detect_enabled,
       email_enabled: s.value.email.enabled, email_imap_host: s.value.email.host,
@@ -55,6 +56,7 @@ async function save() {
       recon_enabled: s.value.recon.enabled, recon_interval_minutes: s.value.recon.interval_minutes,
       auto_backup_enabled: s.value.auto_backup.enabled, auto_backup_keep: s.value.auto_backup.keep,
       our_company: (s.value.our_company || '').trim(),
+      recon_payment_tolerance_pct: Number((Number(s.value.recon_payment_pct || 0) / 100).toFixed(6)),
       bundle_merge_suggest_enabled: s.value.bundle.merge_suggest_enabled,
       bundle_merge_amount_tolerance: s.value.bundle.amount_tolerance_pct / 100,
       bundle_merge_date_window_days: s.value.bundle.date_window_days,
@@ -88,8 +90,10 @@ async function pickDir(key: 'document_root' | 'inbox_root') {
 async function testAi() {
   aiTesting.value = true
   try {
-    const r: any = await http.post('/settings/test/ai')
-    r.ok ? ElMessage.success(`AI 正常：${r.echo}`) : ElMessage.warning(r.detail || 'AI 未启用')
+    // 后端超时由「超时（秒）」控制，前端再多给 15s，保证看到的是后端诊断而不是 axios 超时
+    const timeout = Math.max(75000, (Number(s.value.ai.timeout) || 60) * 1000 + 15000)
+    const r: any = await http.post('/settings/test/ai', null, { timeout })
+    r.ok ? ElMessage.success(`AI 正常（${r.seconds}s）：${r.echo}`) : ElMessage.warning(r.detail || 'AI 未启用')
   } finally { aiTesting.value = false }
 }
 
@@ -193,9 +197,15 @@ onActivated(load)
               <el-form-item label="送审下限（< 直接留待整理）">
                 <el-slider v-model="s.review_threshold" :min="0.3" :max="1" :step="0.01" show-input />
               </el-form-item>
+              <el-form-item label="回款/付款容差（%）">
+                <el-input-number v-model="s.recon_payment_pct" :min="0" :max="10" :step="0.1"
+                                 :precision="1" show-input />
+              </el-form-item>
             </el-form>
             <el-alert :closable="false" type="info"
                       title="介于两者之间的文档进入人工审核队列；看板里的「置信度分布」是调参依据。" />
+            <el-alert class="tol-note" :closable="false" type="info"
+                      title="回款容差只作用于「已收/已付 vs 应收/应付」；结算单与发票对合同金额仍按 0.5% 比对。银行手续费、尾差、分批到账常见，回款放宽到 1% 才不会天天刷屏。调成 0 表示分毫不差。" />
           </div>
           <el-form label-position="top">
             <el-form-item label="规则权重"><el-slider v-model="s.weights.rule" :min="0" :max="1" :step="0.05" show-input /></el-form-item>
@@ -306,6 +316,7 @@ onActivated(load)
                         :placeholder="s.ai.api_key_set ? '已保存（输入新值覆盖）' : '留空=纯规则模式'" />
             </el-form-item>
             <el-form-item label="超时（秒）"><el-input-number v-model="s.ai.timeout" :min="5" :max="300" /></el-form-item>
+            <el-form-item label="关闭深度思考"><el-switch v-model="s.ai.disable_thinking" /><span class="muted" style="margin-left: 8px">推理模型关掉思考通常快几十秒、省成本（部分中转站会忽略此参数）</span></el-form-item>
             <el-button :loading="aiTesting" @click="testAi">测试连接</el-button>
           </el-form>
           <el-form label-position="top">
@@ -398,5 +409,7 @@ onActivated(load)
 .save-bar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 10px;
   padding: 10px 0 14px; background: linear-gradient(transparent, var(--df-bg) 40%); }
 .split-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.tol-note { margin-top: 10px; }
+.tol-note :deep(.el-alert__title) { line-height: 1.6; }
 @media (max-width: 900px) { .split-2 { grid-template-columns: minmax(0, 1fr); } }
 </style>

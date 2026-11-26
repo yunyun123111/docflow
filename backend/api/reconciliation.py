@@ -149,6 +149,8 @@ async def upload_doc_for_diff(diff_id: int, files: list[UploadFile] = File(...),
         return {"diff_id": diff_id, "job_id": None, "saved": [], "rejected": rejected,
                 "hint_role": ""}
     role = (d.detail or {}).get("required_role") or ""
+    if not role and d.diff_type in svc.PAYMENT_DIFF_TYPES:
+        role = "银行回单"          # 回款差异的占位类型：让流水线把上传件直接归到财务/银行回单
     hints: dict[str, str] = {}
     if role:
         cat = db.query(Category).filter(Category.name == role).first()
