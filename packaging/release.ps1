@@ -183,7 +183,8 @@ if ($gh) {
     try { $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$tag" -Headers $hdr -TimeoutSec 30 } catch { $rel = $null }
     if (-not $rel) {
         $body = @{ tag_name = $tag; name = "DocFlow $tag"; body = $Notes; prerelease = [bool]$Prerelease } | ConvertTo-Json
-        $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -Body $body -ContentType "application/json"
+# body 必须按 UTF-8 字节发送：传字符串会被 Windows PowerShell 降级成 ASCII，Release 说明里的中文会变成一串 ?
+        $rel = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$Repo/releases" -Headers $hdr -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType "application/json; charset=utf-8"
     }
     # 先删同名旧资产再上传（API 上传大文件走 uploads.github.com）
     foreach ($a in $rel.assets) {
